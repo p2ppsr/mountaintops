@@ -9,7 +9,7 @@
     "lars:config": "lars config",
     "start": "lars start",
     "build": "cars build 1",
-    "deploy": "cars deploy now 1"
+        "deploy": "cars release now 1"
   },
   "keywords": [],
   "author": "",
