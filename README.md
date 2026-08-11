@@ -21,6 +21,12 @@ Helpful Links:
 - Use `cars` interactively, or visit your hosting provider(s) web portals, to view logs, configure custom domains, and pay your hosting bills
 - Share your new BSV project, it is now online!
 
+## WhatsOnChain access
+
+The frontend uses WhatsOnChain's anonymous API tier and does not require an API key. All WhatsOnChain reads share a client-side limit of three requests per second. Safe reads retry rate-limit and transient server responses with bounded exponential backoff and jitter, and honor a reasonable `Retry-After` value when one is returned.
+
+If an authorization credential is added by an embedding environment and WhatsOnChain rejects it with `401` or `403`, the frontend retries anonymously and omits that credential for the remainder of the browser session.
+
 ## Directory Structure
 
 The project structure is roughly as follows, although it can vary by project.

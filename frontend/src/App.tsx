@@ -8,6 +8,7 @@ import Transaction from '@bsv/sdk/transaction/Transaction';
 import { Beef } from '@bsv/sdk/transaction/Beef';
 import { useMNCErrorHandler } from 'metanet-react-prompt';
 import getBeefForTxid from './getBeefForTxid';
+import { whatsOnChainFetch } from './whatsOnChainClient';
 
 // Instantiate a new BSV WalletClient (auto-detects wallet environment).
 const client = new WalletClient('auto');
@@ -82,11 +83,17 @@ const Mountaintops: React.FC = () => {
 
     const getUtxosForAddress = async (address: string): Promise<Utxo[]> => {
         const network = await getRealWalletNetwork();
-        const response = await fetch(
+        const response = await whatsOnChainFetch(
             `https://api.whatsonchain.com/v1/bsv/${network === 'mainnet' ? 'main' : 'test'
-            }/address/${address}/unspent/all`
+            }/address/${encodeURIComponent(address)}/unspent/all`
         );
+        if (!response.ok) {
+            throw new Error(`WhatsOnChain UTXO request failed (${response.status} ${response.statusText})`);
+        }
         const rp: WoCAddressUnspentAll = await response.json();
+        if (!Array.isArray(rp.result)) {
+            throw new Error(rp.error || 'WhatsOnChain returned an invalid UTXO response');
+        }
         const utxos: Utxo[] = rp.result.filter(r => r.isSpentInMempoolTx === false).map(r => ({ txid: r.tx_hash, vout: r.tx_pos, satoshis: r.value }));
         return utxos
     }
@@ -129,8 +136,14 @@ const Mountaintops: React.FC = () => {
     // Get your balance
     const handleGetBalance = async () => {
         if (mountaintopsAddress) {
-            const fetchedBalance = await fetchBSVBalance(mountaintopsAddress);
-            setBalance(fetchedBalance);
+            try {
+                const fetchedBalance = await fetchBSVBalance(mountaintopsAddress);
+                setBalance(fetchedBalance);
+            } catch (e) {
+                console.error(e);
+                const message = e instanceof Error ? e.message : 'unknown error';
+                alert(`Could not fetch the public address balance: ${message}`);
+            }
         } else {
             alert('Get your address first!');
         }
@@ -375,6 +388,13 @@ const Mountaintops: React.FC = () => {
                         </ul>
                     )}
                 </div>
+
+                <p style={styles.attribution}>
+                    Powered by{' '}
+                    <a href="https://whatsonchain.com" target="_blank" rel="noreferrer" style={styles.attributionLink}>
+                        WhatsOnChain
+                    </a>
+                </p>
             </div>
         </div>
     );
@@ -538,6 +558,15 @@ const styles: { [key: string]: React.CSSProperties } = {
         borderRadius: 6,
         fontSize: '0.9rem',
         overflowWrap: 'break-word',
+    },
+    attribution: {
+        marginTop: 20,
+        marginBottom: 0,
+        fontSize: '0.8rem',
+        opacity: 0.85,
+    },
+    attributionLink: {
+        color: '#fff',
     },
 };
 
