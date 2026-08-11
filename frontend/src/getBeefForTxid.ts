@@ -1,10 +1,16 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-import { Beef } from '@bsv/sdk';
+import { Beef, FetchHttpClient } from '@bsv/sdk';
 import { Services } from '@bsv/wallet-toolbox-client'
+import { whatsOnChainFetch } from './whatsOnChainClient'
+
+const whatsOnChainHttpClient = new FetchHttpClient(whatsOnChainFetch)
 
 export default async function getBeefForTxid(txid: string, chain: 'main' | 'test'): Promise<Beef> {
   const so = Services.createDefaultOptions(chain)
-  so.whatsOnChainApiKey = 'mainnet_f04a761108dc219136b903597c91c778'
   const s = new Services(so)
+
+  // wallet-toolbox does not currently expose its WoC HTTP client as a constructor option.
+  // Route it through the same anonymous, rate-limited client used by the rest of the app.
+  Object.defineProperty(s.whatsonchain, 'httpClient', { value: whatsOnChainHttpClient })
+
   return await s.getBeefForTxid(txid)
 }
