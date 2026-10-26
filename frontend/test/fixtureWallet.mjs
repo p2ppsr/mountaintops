@@ -22,12 +22,15 @@ export class FixtureWallet extends ProtoWallet {
     return { totalOutputs: all.length, outputs: all.slice(args.offset ?? 0, (args.offset ?? 0) + (args.limit ?? 10)).map(([outpoint, value]) => ({ outpoint, ...value })), BEEF: this.beef().toBinary() }
   }
   async createAction(args) {
-    if (args.options?.sendWith && !args.inputs && !args.outputs) return { sendWithResults: args.options.sendWith.map(txid => ({ txid, status: 'unproven' })) }
+    if (args.options?.sendWith && !args.inputs && !args.outputs) {
+      for (const action of this.state.actions) if (args.options.sendWith.includes(action.txid)) action.status = 'unproven'
+      return { sendWithResults: args.options.sendWith.map(txid => ({ txid, status: 'unproven' })) }
+    }
     const requested = args.inputs ?? []
     const inputPoints = requested.map(x => x.outpoint)
     const spendable = [...this.state.outputs.entries()].find(([point, value]) => value.basket === 'default' && !inputPoints.includes(point))
-    if (!spendable) throw new Error('Fixture funding exhausted')
-    inputPoints.push(spendable[0])
+    if (!spendable && !requested.length) throw new Error('Fixture funding exhausted')
+    if (spendable) inputPoints.push(spendable[0])
     const tx = new Transaction(args.version ?? 1, [], [], args.lockTime ?? 0)
     let total = 0
     for (const point of inputPoints) {

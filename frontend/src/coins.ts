@@ -153,7 +153,8 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
     assertReceivable(entry, coverage.stage)
     await pages<UtxoPage>(entry, `/address/${entry.address}/unspent/all`, async page => {
       for (const row of page.result) {
-        if (row.isSpentInMempoolTx !== false) continue
+        if (typeof row.isSpentInMempoolTx !== 'boolean') throw new Error('Deposit spend state is missing; this is not a complete balance.')
+        if (row.isSpentInMempoolTx) continue
         found.push(validateCoin({ txid: row.tx_hash, vout: row.tx_pos, satoshis: row.value, keyID: entry.keyID, address: entry.address, height: row.height && row.height > 0 ? row.height : null }))
       }
       return true
@@ -190,7 +191,10 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
   if (found.length) { progress('Saving deposit evidence in your wallet for device-independent recovery…'); await retainCoins(wallet, entry, found) }
   if (entry.retiredAt) {
     const records = await store.load()
-    if (!records.some(x => x.kind === 'history' && x.data.keyID === entry.keyID && x.data.cutoffHash === entry.retiredAt?.hash)) await store.append('history', { keyID: entry.keyID, cutoffHash: entry.retiredAt.hash, lastReceiveHeight: entry.retiredAt.lastReceiveHeight })
+    if (!records.some(x => x.kind === 'history' && x.data.keyID === entry.keyID && x.data.cutoffHash === entry.retiredAt?.hash)) {
+      try { await store.append('history', { keyID: entry.keyID, cutoffHash: entry.retiredAt.hash, lastReceiveHeight: entry.retiredAt.lastReceiveHeight }) }
+      catch { progress('Coin evidence is retained in your wallet. Saving historical-check completion needs wallet funds; the bounded check may repeat until it is saved. Import remains available.') }
+    }
   }
   const retained = await retainedCoins(wallet, entry)
   const unique = new Map<string, Coin>()
