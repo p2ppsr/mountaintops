@@ -197,8 +197,14 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
       // and its transaction/ancestry are acknowledged by the BRC-100 wallet.
     }
   }
-  if (found.length) { progress('Saving deposit evidence in your wallet for device-independent recovery…'); await retainCoins(wallet, entry, found) }
-  const retained = await retainedCoins(wallet, entry)
+  let retained = await retainedCoins(wallet, entry)
+  const alreadyRetained = new Set(retained.coins.map(coin => `${coin.txid}.${coin.vout}`))
+  const newCoins = found.filter(coin => !alreadyRetained.has(`${coin.txid}.${coin.vout}`))
+  if (newCoins.length) {
+    progress('Saving new deposit evidence in your wallet for device-independent recovery…')
+    await retainCoins(wallet, entry, newCoins)
+    retained = await retainedCoins(wallet, entry)
+  }
   const retainedPoints = new Set(retained.coins.map(coin => `${coin.txid}.${coin.vout}`))
   if (found.some(coin => !retainedPoints.has(`${coin.txid}.${coin.vout}`))) {
     throw new Error('Deposits were found, but the wallet did not return their recovery records. This is an incomplete check, not a zero balance. Keep this address available and retry before importing.')
