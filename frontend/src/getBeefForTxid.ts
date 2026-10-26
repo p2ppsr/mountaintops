@@ -1,11 +1,11 @@
 import { Beef, FetchHttpClient } from '@bsv/sdk';
-import { Services } from '@bsv/wallet-toolbox-client'
-import { fallBackOnChaintracksNotFound } from './chaintracksFallback'
-import { whatsOnChainFetch } from './whatsOnChainClient'
+import { fallBackOnChaintracksNotFound } from './chaintracksFallback.ts'
+import { whatsOnChainFetch } from './whatsOnChainClient.ts'
 
 const whatsOnChainHttpClient = new FetchHttpClient(whatsOnChainFetch)
 
 export default async function getBeefForTxid(txid: string, chain: 'main' | 'test'): Promise<Beef> {
+  const { Services } = await import('@bsv/wallet-toolbox-client')
   const so = Services.createDefaultOptions(chain)
 
   // wallet-toolbox-client 1.x throws when Chaintracks returns ERR_NOT_FOUND,

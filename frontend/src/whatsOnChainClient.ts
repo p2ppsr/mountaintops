@@ -75,7 +75,7 @@ export class WhatsOnChainClient {
   private rejectedCredentials = false
 
   constructor(options: WhatsOnChainClientOptions = {}) {
-    this.fetchImplementation = options.fetch ?? globalThis.fetch.bind(globalThis)
+    this.fetchImplementation = options.fetch ?? ((input, init) => globalThis.fetch(input, init))
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
     this.baseRetryDelayMs = options.baseRetryDelayMs ?? DEFAULT_BASE_RETRY_DELAY_MS
     this.maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS
