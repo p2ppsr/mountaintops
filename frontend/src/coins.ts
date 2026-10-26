@@ -1,7 +1,8 @@
 import { Beef, FetchHttpClient, P2PKH, Transaction, WhatsOnChain, type WalletInterface } from '@bsv/sdk'
 import type { AddressRecord } from '../../shared/brc234.ts'
 import { apiBase, wocTransactionHex, type Coverage } from './coverageClient.ts'
-import { addressMatches, assertReceivable, transactionMatches } from '../../shared/brc234.ts'
+import { addressMatches, assertReceivable, canonicalKeyID, transactionMatches } from '../../shared/brc234.ts'
+import { validateAddress } from './addressBook.ts'
 import { whatsOnChainFetch } from './whatsOnChainClient.ts'
 import getBeefForTxid from './getBeefForTxid.ts'
 import type { WalletRecords } from './walletRecords.ts'
@@ -82,19 +83,27 @@ export async function retainedCoins(wallet: WalletInterface, entry: AddressRecor
   const coins: Coin[] = []
   const beef = new Beef()
   for (let offset = 0; ; offset += 100) {
-    const page = await wallet.listOutputs({ basket: COIN_BASKET, tags: [`address ${entry.address}`], tagQueryMode: 'all', include: 'entire transactions', includeCustomInstructions: true, includeTags: true, limit: 100, offset })
+    // Some existing wallets acknowledge basket insertion but omit output tags
+    // on merged transactions. Discover the entire dedicated basket and scope
+    // by validated per-output metadata; tags must never hide owned coins.
+    const page = await wallet.listOutputs({ basket: COIN_BASKET, include: 'entire transactions', includeCustomInstructions: true, limit: 100, offset })
+    if (typeof page.totalOutputs !== 'number' || !Number.isSafeInteger(page.totalOutputs) || page.totalOutputs < offset + page.outputs.length) throw new Error('Wallet returned an invalid coin count')
     if (page.BEEF) beef.mergeBeef(page.BEEF)
     for (const output of page.outputs) {
       if (!output.customInstructions) throw new Error('Wallet omitted the derivation metadata needed for recovery')
       const metadata = JSON.parse(output.customInstructions) as Coin & { v: number; network: string }
-      if (metadata.v !== 1 || metadata.network !== entry.network) throw new Error('Wallet coin network or schema mismatch')
+      if (metadata.v !== 1 || !['mainnet', 'testnet'].includes(metadata.network)) throw new Error('Wallet coin network or schema mismatch')
       const coin = validateCoin(metadata)
-      if (coin.keyID !== entry.keyID || coin.address !== entry.address || output.outpoint !== `${coin.txid}.${coin.vout}` || BigInt(output.satoshis) !== BigInt(coin.satoshis)) throw new Error('Wallet coin recovery metadata mismatch')
+      canonicalKeyID(coin.keyID); validateAddress(coin.address, metadata.network as AddressRecord['network'])
+      if (output.outpoint !== `${coin.txid}.${coin.vout}` || BigInt(output.satoshis) !== BigInt(coin.satoshis)) throw new Error('Wallet coin recovery metadata mismatch')
+      if (metadata.network !== entry.network || coin.address !== entry.address) continue
+      if (coin.keyID !== entry.keyID) throw new Error('Wallet coin derivation metadata mismatch')
       // Every wallet-retained output was observed during receiving or admitted
       // by the bounded historical bootstrap. A reorg cannot erase its ownership.
       coins.push(coin)
     }
-    if (page.outputs.length < 100) break
+    if (offset + page.outputs.length >= page.totalOutputs) break
+    if (page.outputs.length !== 100) throw new Error('Wallet coin pagination is incomplete')
     if (offset >= 100_000) throw new Error('Wallet coin pagination limit reached; balance is incomplete')
   }
   return { coins, beef }
@@ -188,7 +197,18 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
       // and its transaction/ancestry are acknowledged by the BRC-100 wallet.
     }
   }
-  if (found.length) { progress('Saving deposit evidence in your wallet for device-independent recovery…'); await retainCoins(wallet, entry, found) }
+  let retained = await retainedCoins(wallet, entry)
+  const alreadyRetained = new Set(retained.coins.map(coin => `${coin.txid}.${coin.vout}`))
+  const newCoins = found.filter(coin => !alreadyRetained.has(`${coin.txid}.${coin.vout}`))
+  if (newCoins.length) {
+    progress('Saving new deposit evidence in your wallet for device-independent recovery…')
+    await retainCoins(wallet, entry, newCoins)
+    retained = await retainedCoins(wallet, entry)
+  }
+  const retainedPoints = new Set(retained.coins.map(coin => `${coin.txid}.${coin.vout}`))
+  if (found.some(coin => !retainedPoints.has(`${coin.txid}.${coin.vout}`))) {
+    throw new Error('Deposits were found, but the wallet did not return their recovery records. This is an incomplete check, not a zero balance. Keep this address available and retry before importing.')
+  }
   if (entry.retiredAt) {
     const records = await store.load()
     if (!records.some(x => x.kind === 'history' && x.data.keyID === entry.keyID && x.data.cutoffHash === entry.retiredAt?.hash)) {
@@ -196,7 +216,6 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
       catch { progress('Coin evidence is retained in your wallet. Saving historical-check completion needs wallet funds; the bounded check may repeat until it is saved. Import remains available.') }
     }
   }
-  const retained = await retainedCoins(wallet, entry)
   const unique = new Map<string, Coin>()
   for (const coin of retained.coins) {
     // Revalidate known evidence even for wallet rows omitted from current WoC
