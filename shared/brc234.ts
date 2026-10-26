@@ -131,7 +131,7 @@ export function coverageLabel(address: string, network: Network, anchorMtp: numb
   if (network !== 'mainnet') return 'BRC-234 specifies mainnet coverage; no testnet sunset is defined.'
   const last = lastCoveredStage(address)
   if (last === 27) return 'No later free-coverage cutoff is scheduled.'
-  if (anchorMtp === null) return 'Sunset date not yet determined — schedule begins at mainnet block 1,000,000.'
+  if (anchorMtp === null) return `Sunset date not yet determined — schedule begins at mainnet block 1,000,000. This address passes the filter through stage ${last} and expires when stage ${last + 1} activates.`
   const gate = new Date(eligibilityTime(anchorMtp, last + 1) * 1000).toISOString().slice(0, 10)
   return `Free-coverage eligibility gate: ${gate} UTC. Actual expiration also depends on volume and chain-time activation.`
 }
