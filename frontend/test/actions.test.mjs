@@ -75,3 +75,15 @@ test('a fresh wallet instance finds a signed unsubmitted action without browser 
   assert.equal(records[0].data.reference, 'a'.repeat(64))
   assert.equal(records[0].data.state, 'prepared')
 })
+
+
+test('fresh-device recovery blocks another payment while a submission is sending or unproven', async () => {
+  for (const status of ['sending', 'unproven']) {
+    const wallet = new FixtureWallet()
+    wallet.state.actions.push({ txid: 'a'.repeat(64), status, labels: ['mountaintops actions v1', 'mountaintops request uncertain'], description: 'Awaiting wallet outcome' })
+    const pending = await unfinishedWalletActions(new FixtureWallet(wallet.state), 'mainnet')
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].data.state, 'needs wallet review')
+    await assert.rejects(sendCoins(wallet, { network: 'mainnet' }, new PrivateKey(43).toPublicKey().toAddress(), '0.00000001', { stage: 0 }, () => {}), /unfinished wallet action/)
+  }
+})

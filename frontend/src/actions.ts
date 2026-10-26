@@ -34,7 +34,7 @@ export async function unfinishedWalletActions(wallet: WalletInterface, network: 
   for (let offset = 0; ; offset += 100) {
     const page = await wallet.listActions({ labels: ['mountaintops actions v1'], includeLabels: true, limit: 100, offset })
     for (const action of page.actions) {
-      if (!['unsigned', 'nosend', 'nonfinal', 'unprocessed'].includes(action.status)) continue
+      if (!['unsigned', 'nosend', 'nonfinal', 'unprocessed', 'sending', 'unproven'].includes(action.status)) continue
       const id = action.labels?.find(x => x.startsWith('mountaintops request '))?.slice(21) ?? action.txid
       const canAbort = action.status === 'nosend' && /^[a-f0-9]{64}$/.test(action.txid)
       pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
