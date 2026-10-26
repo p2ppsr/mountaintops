@@ -183,11 +183,14 @@ export default function Mountaintops() {
   const pendingActions = session ? unresolvedActions(session.records) : []
   const card = (entry: AddressRecord, selected = false) => {
     const coins = balances[entry.keyID]
+    const pending = session!.coverage.state?.pending
+    const pendingExpiry = !entry.retiredAt && pending && !addressMatches(entry.address, pending.target)
     return <article className={`address-card ${entry.retiredAt ? 'expired' : ''}`} key={entry.keyID}>
       <h3>{entry.keyID === '1' ? 'Original address' : 'Mined address'} {selected && <span className="badge">Receiving</span>}</h3>
       <code className="address">{entry.address}</code>
       <p className={entry.retiredAt ? 'expiry-warning' : 'coverage'}>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>
       <p>{entry.retiredAt ? 'Mountaintops no longer checks this address for new deposits. Coins received before expiration remain yours and can still be imported.' : 'Stop using this address when it expires. Coins already received remain yours.'}</p>
+      {pendingExpiry && <p className="expiry-warning">Pending sunset at stage {pending.target}: the chain-time notice ends {new Date(pending.deadline * 1000).toISOString().replace('.000Z', ' UTC')}. Expiration starts in the following accepted block. This is a chain-time deadline, not a wall-clock guarantee. Use a longer-coverage address for new payment instructions.</p>}
       {entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}, {new Date(entry.retiredAt.mtp * 1000).toISOString().slice(0, 10)} UTC. Receiving is permanently disabled.</p>}
       <div className="buttons">
         {!entry.retiredAt && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => void run(async () => { const fresh = await reload(); if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked); assertReceivable(fresh.book.find(x => x.keyID === entry.keyID)!, fresh.coverage.stage); await navigator.clipboard.writeText(entry.address); setMessage('Address copied. Include its coverage information when sharing.'); })}>Copy address</button>}
