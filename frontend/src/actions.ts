@@ -4,7 +4,7 @@ import { bookFromRecords, validateAddress } from './addressBook.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { coinIsUnspent, retainedCoins, verifiedEvidence, type Coin } from './coins.ts'
 import Importer from './Importer.ts'
-import type { WalletRecords } from './walletRecords.ts'
+import type { RecoveryRecord, WalletRecords } from './walletRecords.ts'
 
 export function parseSatoshis(bsv: string): number {
   if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,8})?$/.test(bsv)) throw new Error('Enter a positive BSV amount with at most 8 decimal places.')
@@ -26,10 +26,29 @@ export function assertSameTemplate(before: Transaction, after: Transaction): voi
     if (BigInt(a.satoshis ?? -1) !== BigInt(b.satoshis ?? -1) || a.lockingScript.toHex() !== b.lockingScript.toHex()) throw new Error('Wallet changed an authorized payment or change output')
   }
 }
+// Native wallet action history is durable before submission and does not need
+// an extra fee-paying record. In particular, an empty wallet can import its first
+// external coins. Signed noSend actions can be aborted by TXID on a fresh device.
+export async function unfinishedWalletActions(wallet: WalletInterface, network: WalletRecords['network']): Promise<RecoveryRecord[]> {
+  const pending: RecoveryRecord[] = []
+  for (let offset = 0; ; offset += 100) {
+    const page = await wallet.listActions({ labels: ['mountaintops actions v1'], includeLabels: true, limit: 100, offset })
+    for (const action of page.actions) {
+      if (!['unsigned', 'nosend', 'nonfinal', 'unprocessed'].includes(action.status)) continue
+      const id = action.labels?.find(x => x.startsWith('mountaintops request '))?.slice(21) ?? action.txid
+      const canAbort = action.status === 'nosend' && /^[a-f0-9]{64}$/.test(action.txid)
+      pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
+    }
+    if (offset + page.actions.length >= page.totalActions) break
+    if (page.actions.length !== 100 || offset >= 10000) throw new Error('Wallet action history is incomplete. Check the wallet before another payment.')
+  }
+  return pending
+}
+
 export async function eligibleAction(wallet: WalletInterface, store: WalletRecords, args: CreateActionArgs, coverage: Coverage, progress: Progress, coins: Coin[] = [], recipient?: string): Promise<string> {
   const id = crypto.randomUUID()
   const requestLabel = `mountaintops request ${id}`
-  await store.append('action', { id, state: 'preparing', description: args.description })
+  if ((await unfinishedWalletActions(wallet, store.network)).length) throw new Error('Review the unfinished wallet action before another payment.')
   let reference: string | undefined
   let signedTxid: string | undefined
   let submissionStarted = false
@@ -37,7 +56,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
     const started = performance.now()
     let nonce = 0
     while (performance.now() - started < 30_000) {
-      progress(`Preparing an eligible transaction (attempt ${nonce + 1}). Your wallet may request permission; payment fees apply only to the submitted payment; recovery records have their own fees.`)
+      progress(`Preparing an eligible transaction (attempt ${nonce + 1}). Your wallet may request permission; payment fees apply to the submitted payment.`)
       const prepared = await wallet.createAction({ ...args, version: 1, lockTime: nonce++, labels: [...(args.labels ?? []), 'mountaintops actions v1', requestLabel], options: { signAndProcess: false, noSend: true, returnTXIDOnly: false, randomizeOutputs: false } })
       if (!prepared.signableTransaction) throw new Error('The wallet did not return a signable transaction; no automatic retry is safe.')
       reference = prepared.signableTransaction.reference
@@ -69,7 +88,6 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         signedTxid = undefined
         continue
       }
-      await store.append('action', { id, state: 'prepared', reference, txid: signedTxid })
       // Refresh immediately before releasing the transaction. Old tabs cannot
       // rely on the stage observed before a wallet permission dialog.
       const currentRecords = await store.load()
@@ -85,12 +103,10 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         if (store.network === 'mainnet' && !addressMatches(recipient, fresh.stage)) throw new Error('Expired — do not send coins to this address.')
         if (fresh.state?.pending && !addressMatches(recipient, fresh.state.pending.target)) throw new Error('This address expires at the pending transition. Use a longer-coverage destination.')
       }
-      await store.append('action', { id, state: 'submitting', reference, txid: signedTxid })
       submissionStarted = true
       const result = await wallet.createAction({ description: 'Submit eligible Mountaintops payment', options: { sendWith: [signedTxid], acceptDelayedBroadcast: false, returnTXIDOnly: false } })
       const status = result.sendWithResults?.find(x => x.txid === signedTxid)?.status
       if (!status || status === 'failed') throw new Error('Wallet reported a submission failure; inspect its transaction status before another payment.')
-      await store.append('action', { id, state: 'submitted', txid: signedTxid, status: status ?? 'wallet processing' })
       return signedTxid
     }
     throw new Error('No eligible transaction found within the 30-second work budget. Nothing was submitted.')
@@ -100,12 +116,8 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         const result = await wallet.abortAction({ reference })
         if (!result.aborted) throw new Error('Abort not acknowledged')
       } catch {
-        await store.append('action', { id, state: 'needs wallet review', reference, txid: signedTxid ?? null })
         throw new Error('Wallet action cleanup is unresolved. Open the wallet transaction history before preparing another payment.')
       }
-    }
-    try { await store.append('action', { id, state: submissionStarted ? 'unknown submission' : 'canceled', txid: signedTxid ?? null, reference: reference ?? null }) } catch {
-      if (!submissionStarted) throw new Error('Action was not submitted, but recording cleanup failed. Review wallet history before retrying.')
     }
     if (submissionStarted) throw new Error(`Submission outcome is uncertain${signedTxid ? ` for ${signedTxid}` : ''}. The wallet may retry automatically. Do not send again; check wallet history.`)
     throw error

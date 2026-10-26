@@ -79,3 +79,11 @@ test('retained pre-sunset coins recover using wallet BEEF and known-output check
     assert.equal(coins[0].fundingCoverage, 'covered')
   } finally { globalThis.fetch = previous }
 })
+
+
+test('a missing discovery spend-state flag never silently becomes zero', async () => {
+  const previous = globalThis.fetch
+  globalThis.fetch = async () => Response.json({ address: retired.address, result: [{ tx_hash: 'a'.repeat(64), tx_pos: 0, value: 1000 }] })
+  try { await assert.rejects(refreshCoins({}, {}, { ...retired, retiredAt: null }, { stage: 0 }, () => {}), /not a complete balance/) }
+  finally { globalThis.fetch = previous }
+})

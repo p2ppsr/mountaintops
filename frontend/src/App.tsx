@@ -5,7 +5,7 @@ import { WalletRecords, type RecoveryRecord } from './walletRecords.ts'
 import { applyExpirations, bookFromRecords, primaryFromRecords } from './addressBook.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { refreshCoins, type Coin } from './coins.ts'
-import { importCoins, sendCoins } from './actions.ts'
+import { importCoins, sendCoins, unfinishedWalletActions } from './actions.ts'
 import './style.css'
 
 const client = new WalletClient('auto')
@@ -64,6 +64,7 @@ export default function Mountaintops() {
     const receivingBlocked = await applyExpirations(book, coverage, store)
     records = await store.load()
     if (!receivingBlocked) book = bookFromRecords(identity, network, records)
+    records = [...records, ...await unfinishedWalletActions(client, network)]
     const next = { identity, network, store, records, book, coverage, primary: receivingBlocked ? null : primaryFromRecords(book, records, coverage.stage), receivingBlocked }
     setSession(next)
     return next
@@ -227,11 +228,9 @@ export default function Mountaintops() {
         if (action.state === 'prepared' && typeof action.reference === 'string') {
           const aborted = await client.abortAction({ reference: action.reference })
           if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
-          await fresh.store.append('action', { id: action.id, state: 'canceled' })
         } else {
           const page = await client.listActions({ labels: [`mountaintops request ${String(action.id)}`], limit: 100 })
           if (!page.actions.length || page.actions.some(x => !['completed', 'failed'].includes(x.status))) throw new Error('Wallet has not established a final outcome. Do not retry this payment.')
-          await fresh.store.append('action', { id: action.id, state: 'reviewed in wallet' })
         }
         await reload(fresh); setMessage('Wallet action state checked.')
       })}>{action.state === 'prepared' ? 'Cancel unsubmitted preparation' : 'Check wallet outcome'}</button></div>)}</section>}
