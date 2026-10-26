@@ -1,612 +1,244 @@
-import { useState, useRef } from 'react';
-import WalletClient from '@bsv/sdk/wallet/WalletClient';
-import PublicKey from '@bsv/sdk/primitives/PublicKey';
-import P2PKH from '@bsv/sdk/script/templates/P2PKH';
-import { CreateActionInput, SignActionArgs } from '@bsv/sdk/wallet/Wallet.interfaces';
-import Importer from './Importer';
-import Transaction from '@bsv/sdk/transaction/Transaction';
-import { Beef } from '@bsv/sdk/transaction/Beef';
-import { useMNCErrorHandler } from 'metanet-react-prompt';
-import getBeefForTxid from './getBeefForTxid';
-import { whatsOnChainFetch } from './whatsOnChainClient';
+import { useEffect, useRef, useState } from 'react'
+import { PublicKey, WalletClient } from '@bsv/sdk'
+import { addressMatches, assertReceivable, coverageLabel, lastCoveredStage, stages, type AddressRecord, type Network } from '../../shared/brc234.ts'
+import { WalletRecords, type RecoveryRecord } from './walletRecords.ts'
+import { applyExpirations, bookFromRecords, primaryFromRecords } from './addressBook.ts'
+import { readCoverage, type Coverage } from './coverageClient.ts'
+import { refreshCoins, type Coin } from './coins.ts'
+import { importCoins, sendCoins } from './actions.ts'
+import './style.css'
 
-// Instantiate a new BSV WalletClient (auto-detects wallet environment).
-const client = new WalletClient('auto');
+const client = new WalletClient('auto')
+type Session = { identity: string; network: Network; store: WalletRecords; book: AddressRecord[]; records: RecoveryRecord[]; coverage: Coverage; primary: string | null; receivingBlocked: string | null }
+const money = (satoshis: number) => `${Math.floor(satoshis / 100_000_000)}.${String(satoshis % 100_000_000).padStart(8, '0')} BSV`
 
-// Background music (public domain piece for demonstration):
-const backgroundMusicUrl =
-    'https://upload.wikimedia.org/wikipedia/commons/8/8f/Fur_Elise.ogg';
+function unresolvedActions(records: RecoveryRecord[]) {
+  const actions = new Map<string, Record<string, unknown>>()
+  for (const record of records) if (record.kind === 'action') actions.set(String(record.data.id), record.data)
+  return [...actions.values()].filter(x => !['submitted', 'canceled', 'reviewed in wallet'].includes(String(x.state)))
+}
 
-// Sound effect (Wilhelm Scream or similar for "shouting" BSV):
-const shoutSoundUrl = '/shout.mp3';
+export default function Mountaintops() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [balances, setBalances] = useState<Record<string, Coin[] | undefined>>({})
+  const [target, setTarget] = useState('auto')
+  const [found, setFound] = useState<string | null>(null)
+  const [recipient, setRecipient] = useState('')
+  const [amount, setAmount] = useState('')
+  const [txid, setTxid] = useState('')
+  const [history, setHistory] = useState<{ txid: string; description: string; status: string }[]>([])
+  const [searching, setSearching] = useState(false)
+  const worker = useRef<Worker | null>(null)
+  const searchProgress = useRef<{ stage: number; next: string } | null>(null)
+  const operation = useRef(false)
+  const current = useRef<Session | null>(null)
+  current.current = session
 
-// Main Component
-const Mountaintops: React.FC = () => {
-    const handleMNCError = useMNCErrorHandler()
-    const [mountaintopsAddress, setMountaintopsAddress] = useState<string | null>(null);
-    const [balance, setBalance] = useState<number>(-1);
-    const [recipientAddress, setRecipientAddress] = useState<string>('');
-    const [amount, setAmount] = useState<string>('');
-    const [transactions, setTransactions] = useState<
-        Array<{ txid: string; to: string; amount: string }>
-    >([]);
-
-    // Refs for audio elements
-    const shoutAudioRef = useRef<HTMLAudioElement>(null);
-    const bgAudioRef = useRef<HTMLAudioElement>(null);
-
-    // Track whether background music is playing
-    const [isMusicPlaying, setIsMusicPlaying] = useState(false);
-
-    // Fetch the real wallet network
-    const getRealWalletNetwork = async (): Promise<'mainnet' | 'testnet'> => {
-        try {
-            const { network } = await client.getNetwork({});
-            return network;
-        } catch (e) {
-            handleMNCError(e as Error)
-            throw e
-        }
-    };
-
-    // Derive a public "Mountaintops" address (publicly exposed in this app)
-    const getMountaintopsAddress = async (): Promise<string> => {
-        const network = await getRealWalletNetwork();
-        const { publicKey } = await client.getPublicKey({
-            protocolID: [1, 'mountaintops'],
-            keyID: '1',
-            counterparty: 'anyone',
-            forSelf: true,
-        });
-        return PublicKey.fromString(publicKey).toAddress(network);
-    };
-
-    interface Utxo {
-        txid: string;
-        vout: number;
-        satoshis: number;
-    }
-
-    interface WoCAddressUnspentAll {
-        error: string,
-        address: string,
-        script: string,
-        result: {
-            height?: number,
-            tx_pos: number,
-            tx_hash: string,
-            value: number,
-            isSpentInMempoolTx: boolean,
-            status: string
-        }[]
-    }
-
-    const getUtxosForAddress = async (address: string): Promise<Utxo[]> => {
-        const network = await getRealWalletNetwork();
-        const response = await whatsOnChainFetch(
-            `https://api.whatsonchain.com/v1/bsv/${network === 'mainnet' ? 'main' : 'test'
-            }/address/${encodeURIComponent(address)}/unspent/all`
-        );
-        if (!response.ok) {
-            throw new Error(`WhatsOnChain UTXO request failed (${response.status} ${response.statusText})`);
-        }
-        const rp: WoCAddressUnspentAll = await response.json();
-        if (!Array.isArray(rp.result)) {
-            throw new Error(rp.error || 'WhatsOnChain returned an invalid UTXO response');
-        }
-        const utxos: Utxo[] = rp.result.filter(r => r.isSpentInMempoolTx === false).map(r => ({ txid: r.tx_hash, vout: r.tx_pos, satoshis: r.value }));
-        return utxos
-    }
-
-    // Fetch BSV balance for a given address
-    const fetchBSVBalance = async (address: string): Promise<number> => {
-        const utxos = await getUtxosForAddress(address);
-        const balance = utxos.reduce((acc, r) => acc + r.satoshis, 0);
-        return balance / 100000000;
-    };
-
-    // Send BSV to a recipient address
-    const sendBSV = async (to: string, amount: number): Promise<string | undefined> => {
-        const network = await getRealWalletNetwork();
-        // Very naive network vs. address check for demo:
-        if (network === 'mainnet' && !to.startsWith('1')) {
-            alert('You are on mainnet but the recipient address does not look like a mainnet address (starting with 1)!');
-            return;
-        }
-
-        const lockingScript = new P2PKH().lock(to).toHex();
-        const { txid } = await client.createAction({
-            description: 'Shout BSV at an address',
-            outputs: [
-                {
-                    lockingScript,
-                    satoshis: Math.round(amount * 100000000),
-                    outputDescription: 'BSV for recipient address',
-                },
-            ],
-        });
-        return txid;
-    };
-
-    // Show your address
-    const handleViewAddress = async () => {
-        setMountaintopsAddress(await getMountaintopsAddress());
-    };
-
-    // Get your balance
-    const handleGetBalance = async () => {
-        if (mountaintopsAddress) {
-            try {
-                const fetchedBalance = await fetchBSVBalance(mountaintopsAddress);
-                setBalance(fetchedBalance);
-            } catch (e) {
-                console.error(e);
-                const message = e instanceof Error ? e.message : 'unknown error';
-                alert(`Could not fetch the public address balance: ${message}`);
-            }
-        } else {
-            alert('Get your address first!');
-        }
-    };
-
-    // Import funds from the "Mountaintops" address
-    const handleImportFunds = async () => {
-        if (!mountaintopsAddress || balance < 0) {
-            alert('Get your address and balance first!');
-            return;
-        }
-        if (balance === 0) {
-            alert('No money to import!');
-            return;
-        }
-
-        let reference: string | undefined = undefined;
-        try {
-            const network = await getRealWalletNetwork();
-            const utxos = await getUtxosForAddress(mountaintopsAddress);
-
-            const outpoints: string[] = utxos.map(x => `${x.txid}.${x.vout}`)
-            const inputs: CreateActionInput[] = outpoints.map(outpoint => ({
-                outpoint,
-                inputDescription: 'Redeem from the Mountaintops',
-                unlockingScriptLength: 108,
-            }));
-
-            // Merge BEEF for the inputs (placeholder)
-            const inputBEEF = new Beef();
-            for (let i = 0; i < inputs.length; i++) {
-                const txid = inputs[i].outpoint.split('.')[0];
-                if (!inputBEEF.findTxid(txid)) {
-                    const beef = await getBeefForTxid(txid, network === 'mainnet' ? 'main' : 'test')
-                    inputBEEF.mergeBeef(beef);
-                }
-            }
-
-            // Create the action for spending from these inputs
-            const { signableTransaction } = await client.createAction({
-                inputBEEF: inputBEEF.toBinary(),
-                inputs,
-                description: 'Import from the Mountaintops',
-            });
-
-            reference = signableTransaction!.reference;
-
-            // Convert BEEF to a Transaction object
-            const tx = Transaction.fromAtomicBEEF(signableTransaction!.tx);
-            const importer = new Importer();
-            const unlocker = importer.unlock(client);
-
-            const signActionArgs: SignActionArgs = {
-                reference,
-                spends: {},
-            };
-
-            // Sign each input
-            for (let i = 0; i < inputs.length; i++) {
-                const script = await unlocker.sign(tx, i);
-                signActionArgs.spends[i] = {
-                    unlockingScript: script.toHex(),
-                };
-            }
-
-            // Broadcast signatures back to the wallet
-            await client.signAction(signActionArgs);
-
-            // Reset the local balance after successful import
-            setBalance(0);
-            alert('Funds successfully imported to your real wallet!');
-        } catch (e) {
-            console.error(e)
-            // Abort in case something goes wrong
-            if (reference) {
-                await client.abortAction({ reference });
-            }
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const message = `Import failed: ${(e as any).message || 'unknown error'}`;
-            alert(message);
-        }
-    };
-
-    // SHOUT BSV to someone
-    const handleShoutBSV = async () => {
-        if (!recipientAddress || !amount) {
-            alert('Please enter a recipient address AND an amount first!');
-            return;
-        }
-
-        const amt = Number(amount);
-        if (isNaN(amt) || amt <= 0) {
-            alert('Please enter a valid amount > 0.');
-            return;
-        }
-
-        const txid = await sendBSV(recipientAddress, amt);
-        if (txid) {
-            // Play the "shout" sound effect
-            if (shoutAudioRef.current) {
-                shoutAudioRef.current.currentTime = 0;
-                shoutAudioRef.current.play().catch(() => {
-                    // Browser may block autoplay if no user interaction
-                });
-            }
-            alert(
-                `Successfully SHOUTED ${amt} BSV from your real wallet to ${recipientAddress} with absolutely no privacy! TXID: ${txid}`
-            );
-
-            // Record the transaction locally
-            setTransactions((prev) => [
-                ...prev,
-                {
-                    txid,
-                    to: recipientAddress,
-                    amount: amt.toString(),
-                },
-            ]);
-            setRecipientAddress('');
-            setAmount('');
-        }
-    };
-
-    // Toggle background music on/off
-    const toggleBackgroundMusic = () => {
-        if (!bgAudioRef.current) return;
-
-        if (isMusicPlaying) {
-            // Pause music
-            bgAudioRef.current.pause();
-            setIsMusicPlaying(false);
-        } else {
-            // Play music
-            bgAudioRef.current.currentTime = 0;
-            bgAudioRef.current
-                .play()
-                .then(() => {
-                    setIsMusicPlaying(true);
-                })
-                .catch(() => {
-                    alert('Failed to play background music (autoplay restrictions).');
-                });
-        }
-    };
-
-    return (
-        <div style={styles.container}>
-            {/* "Panoramic" background container */}
-            <div style={styles.background}></div>
-
-            {/* Audio elements */}
-            <audio ref={shoutAudioRef} src={shoutSoundUrl} preload="auto" />
-            <audio ref={bgAudioRef} src={backgroundMusicUrl} loop preload="auto" />
-
-            {/* Main content panel */}
-            <div style={styles.content}>
-                <h1 style={styles.title}>Mountaintops</h1>
-                <p style={styles.subtitle}>
-                    Shout all your transactions from the mountaintops, with <br />
-                    <span style={{ color: '#ff5757', fontWeight: 'bold' }}>
-                        ABSOLUTELY NO PRIVACY!
-                    </span>
-                </p>
-
-                {/* Toggle background music button */}
-                <div style={styles.musicToggleArea}>
-                    <button style={styles.musicButton} onClick={toggleBackgroundMusic}>
-                        {isMusicPlaying ? 'Pause Background Music' : 'Play Background Music'}
-                    </button>
-                </div>
-
-                {/* Address and balance section */}
-                <div style={styles.section}>
-                    {!mountaintopsAddress ? (
-                        <button style={styles.actionButton} onClick={handleViewAddress}>
-                            Show My BSV Address
-                        </button>
-                    ) : (
-                        <>
-                            <p style={styles.label}>Your Mountaintops Address (exposed):</p>
-                            <div style={styles.addressBox}>{mountaintopsAddress}</div>
-
-                            <div style={styles.buttonsRow}>
-                                <button style={styles.actionButton} onClick={handleGetBalance}>
-                                    Get Balance
-                                </button>
-                                <button style={styles.actionButton} onClick={handleImportFunds}>
-                                    Import Money
-                                </button>
-                            </div>
-
-                            <p style={styles.balanceText}>
-                                Current BSV at this super-public address:{' '}
-                                {balance === -1
-                                    ? 'Not checked yet!'
-                                    : `${balance} BSV (everyone can see it!)`}
-                            </p>
-                        </>
-                    )}
-                </div>
-
-                {/* Shout BSV form */}
-                <div style={styles.section}>
-                    <h3 style={styles.sectionTitle}>
-                        SHOUT BSV Across To Someone:
-                    </h3>
-                    <input
-                        style={styles.input}
-                        placeholder="Recipient Address"
-                        value={recipientAddress}
-                        onChange={(e) => setRecipientAddress(e.target.value)}
-                    />
-                    <input
-                        style={styles.input}
-                        placeholder="Amount (BSV)"
-                        value={amount}
-                        onChange={(e) => setAmount(e.target.value)}
-                    />
-                    <button style={{ ...styles.actionButton, ...styles.shoutButton }} onClick={handleShoutBSV}>
-                        SHOUT BSV
-                    </button>
-                </div>
-
-                {/* List of previous shouted transactions */}
-                <div style={styles.section}>
-                    <h3 style={styles.sectionTitle}>Shouted Transactions</h3>
-                    {transactions.length === 0 ? (
-                        <p style={styles.emptyState}>
-                            No transactions shouted yet... (but the world is waiting!)
-                        </p>
-                    ) : (
-                        <ul style={styles.txList}>
-                            {transactions.map((tx, index) => (
-                                <li key={index} style={styles.txListItem}>
-                                    <strong>TXID:</strong> {tx.txid}
-                                    <br />
-                                    <strong>To:</strong> {tx.to}
-                                    <br />
-                                    <strong>Amount:</strong> {tx.amount} BSV
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-
-                <p style={styles.attribution}>
-                    Powered by{' '}
-                    <a href="https://whatsonchain.com" target="_blank" rel="noreferrer" style={styles.attributionLink}>
-                        WhatsOnChain
-                    </a>
-                </p>
-            </div>
-        </div>
-    );
-};
-
-/** ========== STYLING & ANIMATIONS ========== */
-
-const styles: { [key: string]: React.CSSProperties } = {
-    container: {
-        position: 'relative',
-        height: '100vh',
-        width: '100vw',
-        overflow: 'auto',
-        margin: 0,
-        padding: 0,
-        fontFamily: `'Segoe UI', Tahoma, Geneva, Verdana, sans-serif`,
-        color: '#fff',
-        textAlign: 'center',
-    },
-
-    // Key background with slow panning effect
-    background: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: -1,
-        backgroundImage:
-            'url("/mountains.jpg")',
-        backgroundRepeat: 'no-repeat',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        // Sloooow pan from left to right (30s)
-        animation: 'pan 30s infinite alternate linear',
-    },
-
-    content: {
-        position: 'relative',
-        marginTop: 50,
-        marginBottom: 50,
-        padding: 20,
-        width: '90%',
-        maxWidth: 700,
-        marginLeft: 'auto',
-        marginRight: 'auto',
-        backgroundColor: 'rgba(0, 0, 0, 0.6)',
-        borderRadius: 12,
-        boxShadow: '0 0 20px rgba(0,0,0,0.5)',
-    },
-
-    title: {
-        fontSize: '3rem',
-        margin: 0,
-        fontWeight: 700,
-        textShadow: '2px 2px 4px #000',
-    },
-    subtitle: {
-        marginTop: 10,
-        marginBottom: 20,
-        fontSize: '1.2rem',
-        lineHeight: 1.4,
-        textShadow: '1px 1px 2px #000',
-    },
-
-    musicToggleArea: {
-        marginBottom: 20,
-    },
-    musicButton: {
-        backgroundColor: '#4caf50',
-        border: 'none',
-        padding: '10px 25px',
-        fontSize: '1rem',
-        borderRadius: 8,
-        cursor: 'pointer',
-        transition: 'transform 0.2s ease, background-color 0.2s ease',
-        color: '#fff',
-        fontWeight: 600,
-    },
-
-    section: {
-        marginTop: 30,
-        marginBottom: 30,
-    },
-    sectionTitle: {
-        fontSize: '1.5rem',
-        marginBottom: 10,
-        textShadow: '1px 1px 3px #000',
-    },
-
-    label: {
-        fontWeight: 'bold',
-        fontSize: '1rem',
-        marginBottom: 5,
-    },
-    addressBox: {
-        backgroundColor: '#222',
-        padding: '10px',
-        borderRadius: 6,
-        marginBottom: 10,
-        overflowWrap: 'break-word',
-        fontSize: '0.9rem',
-        letterSpacing: '0.5px',
-    },
-    buttonsRow: {
-        display: 'flex',
-        justifyContent: 'center',
-        marginBottom: 20,
-        gap: 10,
-    },
-    actionButton: {
-        backgroundColor: '#ff004c',
-        color: '#fff',
-        padding: '10px 20px',
-        borderRadius: 8,
-        border: 'none',
-        fontSize: '1rem',
-        cursor: 'pointer',
-        fontWeight: 600,
-        transition: 'transform 0.2s ease, background-color 0.2s ease',
-        boxShadow: '0 4px 10px rgba(0,0,0,0.3)',
-    },
-    shoutButton: {
-        animation: 'pulse 2s infinite',
-    },
-    balanceText: {
-        marginTop: 15,
-        fontSize: '1.1rem',
-        fontStyle: 'italic',
-    },
-
-    input: {
-        display: 'block',
-        width: '80%',
-        maxWidth: 400,
-        margin: '10px auto',
-        padding: '10px',
-        borderRadius: 6,
-        border: '2px solid #ff004c',
-        outline: 'none',
-        fontSize: '1rem',
-        textAlign: 'center',
-        backgroundColor: '#fff',
-        color: '#000',
-    },
-    emptyState: {
-        marginTop: 15,
-        fontStyle: 'italic',
-        fontSize: '0.95rem',
-    },
-    txList: {
-        listStyle: 'none',
-        margin: 0,
-        padding: 0,
-        textAlign: 'left',
-    },
-    txListItem: {
-        backgroundColor: 'rgba(255, 255, 255, 0.1)',
-        marginBottom: 10,
-        padding: 10,
-        borderRadius: 6,
-        fontSize: '0.9rem',
-        overflowWrap: 'break-word',
-    },
-    attribution: {
-        marginTop: 20,
-        marginBottom: 0,
-        fontSize: '0.8rem',
-        opacity: 0.85,
-    },
-    attributionLink: {
-        color: '#fff',
-    },
-};
-
-/**
- * We define our keyframe animations here:
- *  - A slow horizontal pan for the background
- *  - A pulse for the SHOUT button
- */
-const styleSheet = document.createElement('style');
-styleSheet.type = 'text/css';
-styleSheet.innerHTML = `
-@keyframes pan {
-  0% {
-    background-position: left center;
+  useEffect(() => () => { worker.current?.terminate() }, [])
+  const run = async (task: () => Promise<void>, quiet = false) => {
+    if (operation.current) return
+    operation.current = true; setBusy(true)
+    if (!quiet) { setError(''); setMessage('') }
+    try { await task() } catch (e) { setError(e instanceof Error ? e.message : 'Operation unavailable. Check your wallet before retrying a payment.') }
+    finally { operation.current = false; setBusy(false) }
   }
-  100% {
-    background-position: right center;
+
+  const reload = async (previous: Session | null = current.current): Promise<Session> => {
+    const { network } = await client.getNetwork({})
+    const { publicKey: identity } = await client.getPublicKey({ identityKey: true })
+    if (previous && (previous.identity !== identity || previous.network !== network)) {
+      setSession(null); setBalances({}); setFound(null)
+      throw new Error('Wallet account or network changed. Connect again to load its own records.')
+    }
+    const store = previous?.store ?? new WalletRecords(client, identity, network)
+    let records = await store.load()
+    const coverage = await readCoverage(network, records, store, setMessage)
+    let book = bookFromRecords(identity, network, records)
+    const legacy = await client.getPublicKey({ protocolID: [1, 'mountaintops'], keyID: '1', counterparty: 'anyone', forSelf: true })
+    if (PublicKey.fromString(legacy.publicKey).toAddress(network) !== book[0].address) throw new Error('Wallet does not match the original Mountaintops derivation')
+    // ID 1 is always reconstructible. Only newly mined addresses need a durable
+    // publication record, so connecting alone creates no storage transaction.
+    const receivingBlocked = await applyExpirations(book, coverage, store)
+    records = await store.load()
+    if (!receivingBlocked) book = bookFromRecords(identity, network, records)
+    const next = { identity, network, store, records, book, coverage, primary: receivingBlocked ? null : primaryFromRecords(book, records, coverage.stage), receivingBlocked }
+    setSession(next)
+    return next
   }
-}
 
-@keyframes pulse {
-  0% { transform: scale(1); box-shadow: 0 0 5px rgba(255,0,76,0.5); }
-  50% { transform: scale(1.05); box-shadow: 0 0 20px rgba(255,0,76,0.7); }
-  100% { transform: scale(1); box-shadow: 0 0 5px rgba(255,0,76,0.5); }
-}
+  // Only chain coverage is rechecked. No background address-deposit polling.
+  useEffect(() => {
+    if (!session) return
+    const timer = setInterval(() => {
+      if (!operation.current && !worker.current) void run(async () => { await reload() }, true)
+    }, 60_000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(session)])
 
-/* Hover effect on buttons */
-button:hover {
-  transform: scale(1.05);
-}
+  const publishFound = async (result: { stage: number; keyID: string; address: string }) => {
+    await run(async () => {
+      const fresh = await reload()
+      if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
+      const existing = fresh.book.find(x => x.keyID === result.keyID)
+      if (existing) assertReceivable(existing, fresh.coverage.stage)
+      if (fresh.network === 'mainnet' && !addressMatches(result.address, fresh.coverage.stage)) throw new Error('Found address has expired. Choose a stricter target.')
+      const expected = await client.getPublicKey({ protocolID: [1, 'mountaintops'], keyID: result.keyID, counterparty: 'anyone', forSelf: true })
+      if (PublicKey.fromString(expected.publicKey).toAddress(fresh.network) !== result.address) throw new Error('Mined public key does not match the wallet')
+      if (!existing) await fresh.store.append('address', { keyID: result.keyID, address: result.address, targetStage: result.stage })
+      await reload(fresh); setFound(result.keyID)
+      setMessage('Address saved as an encrypted PushDrop record in your wallet. Review it, then select “Use this address”.')
+    })
+  }
 
-/* Active (clicked) effect on buttons */
-button:active {
-  transform: scale(0.95);
-}
+  const mine = async () => {
+    await run(async () => {
+      const fresh = await reload()
+      if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
+      if (fresh.network !== 'mainnet') throw new Error('BRC-234 mining targets mainnet; testnet has no sunset schedule.')
+      const minimum = Math.min(27, Math.max(1, fresh.coverage.stage, fresh.coverage.state?.pending?.target ?? 0, ...fresh.book.map(x => lastCoveredStage(x.address) + 1)))
+      const chosen = target === 'auto' ? undefined : Number(target)
+      if (chosen !== undefined && chosen < minimum) throw new Error(`Choose stage ${minimum} or later to improve the saved addresses.`)
+      const saved = fresh.records.filter(x => x.kind === 'search' && x.data.stage === chosen).at(-1)
+      const nextWorker = new Worker(new URL('./miner.worker.ts', import.meta.url), { type: 'module' })
+      worker.current = nextWorker; searchProgress.current = null; setSearching(true); setFound(null)
+      nextWorker.onmessage = ({ data }) => {
+        if (worker.current !== nextWorker) return
+        if (data.kind === 'started') setMessage(`Searching stage ${data.stage}. Suggested work budget: 30 seconds; completion time is uncertain.`)
+        if (data.kind === 'progress') {
+          searchProgress.current = { stage: data.stage, next: data.next }
+          setMessage(`Searching stage ${data.stage}: ${BigInt(data.next).toLocaleString()} key IDs checked · ${Math.floor(data.elapsed / 1000)} seconds.`)
+        }
+        if (['found', 'paused', 'error'].includes(data.kind)) {
+          nextWorker.terminate(); worker.current = null; setSearching(false)
+          if (data.kind === 'found') void publishFound(data)
+          if (data.kind === 'paused') void run(async () => {
+            const now = await reload(); await now.store.append('search', { stage: data.stage, next: data.next }); await reload(now)
+            setTarget(String(data.stage)); setMessage('No match yet. Progress saved in your wallet. Continue this target or choose an easier one.')
+          })
+          if (data.kind === 'error') setError(String(data.message))
+        }
+      }
+      nextWorker.onerror = () => { nextWorker.terminate(); worker.current = null; setSearching(false); setError('Address worker failed. Published addresses remain in your wallet.') }
+      nextWorker.postMessage({ identityKey: fresh.identity, network: fresh.network, minimumStage: minimum, targetStage: chosen, start: saved?.data.next ?? '1' })
+    })
+  }
 
-body {
-  margin: 0;
-}
-`;
-document.head.appendChild(styleSheet);
+  const cancelMine = () => {
+    worker.current?.terminate(); worker.current = null; setSearching(false)
+    void run(async () => {
+      const progress = searchProgress.current
+      if (progress && current.current) { await current.current.store.append('search', progress); await reload() }
+      setMessage('Search paused. Published addresses remain available from your wallet on another device.')
+    })
+  }
+  const choose = (keyID: string) => void run(async () => {
+    const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)
+    if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
+    if (!entry) throw new Error('Address not found')
+    assertReceivable(entry, fresh.coverage.stage)
+    await fresh.store.append('primary', { keyID }); await reload(fresh); setFound(null); setMessage('Receiving address selected. Previous addresses keep their own sunset dates.')
+  })
+  const checkCoins = (keyID: string) => void run(async () => {
+    const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)!
+    const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
+    setBalances(x => ({ ...x, [keyID]: coins })); await reload(fresh)
+    setMessage('Funds checked and deposit evidence retained in your wallet. Network checks depend on WoC availability.')
+  })
+  const importMoney = (keyID: string) => void run(async () => {
+    const fresh = await reload()
+    if (unresolvedActions(fresh.records).length) throw new Error('Review the unfinished wallet action before another payment.')
+    const entry = fresh.book.find(x => x.keyID === keyID)!
+    const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
+    setTxid(await importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage)); setBalances(x => ({ ...x, [keyID]: undefined }))
+    await reload(fresh); setMessage('Import submitted. Check wallet status; confirmations and wallet credit may follow later.')
+  })
+  const send = () => void run(async () => {
+    const fresh = await reload()
+    if (unresolvedActions(fresh.records).length) throw new Error('Review the unfinished wallet action before another payment.')
+    if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
+    const own = fresh.book.find(x => x.address === recipient)
+    if (own) assertReceivable(own, fresh.coverage.stage)
+    setTxid(await sendCoins(client, fresh.store, recipient, amount, fresh.coverage, setMessage))
+    setRecipient(''); setAmount(''); await reload(fresh)
+    setMessage('Payment submitted. Exchange credit and confirmation are separate; check wallet history before retrying.')
+  })
+  const loadHistory = () => void run(async () => {
+    await reload(); const actions = []
+    for (let offset = 0; ; offset += 100) {
+      const page = await client.listActions({ labels: ['mountaintops actions v1'], limit: 100, offset })
+      actions.push(...page.actions.map(x => ({ txid: x.txid, description: x.description, status: x.status })))
+      if (page.actions.length < 100) break
+      if (offset >= 10_000) throw new Error('Open your wallet for complete transaction history.')
+    }
+    setHistory(actions)
+  })
 
-export default Mountaintops;
+  const disabled = busy || searching
+  const primary = session?.book.find(x => x.keyID === session.primary)
+  const foundEntry = session?.book.find(x => x.keyID === found)
+  const pendingActions = session ? unresolvedActions(session.records) : []
+  const card = (entry: AddressRecord, selected = false) => {
+    const coins = balances[entry.keyID]
+    const pending = session!.coverage.state?.pending
+    const pendingExpiry = !entry.retiredAt && pending && !addressMatches(entry.address, pending.target)
+    return <article className={`address-card ${entry.retiredAt ? 'expired' : ''}`} key={entry.keyID}>
+      <h3>{entry.keyID === '1' ? 'Original address' : 'Mined address'} {selected && <span className="badge">Receiving</span>}</h3>
+      <code className="address">{entry.address}</code>
+      <p className={entry.retiredAt ? 'expiry-warning' : 'coverage'}>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>
+      <p>{entry.retiredAt ? 'Mountaintops no longer checks this address for new deposits. Coins received before expiration remain yours and can still be imported.' : 'Stop using this address when it expires. Coins already received remain yours.'}</p>
+      {pendingExpiry && <p className="expiry-warning">Pending sunset at stage {pending.target}: the chain-time notice ends {new Date(pending.deadline * 1000).toISOString().replace('.000Z', ' UTC')}. Expiration starts in the following accepted block. This is a chain-time deadline, not a wall-clock guarantee. Use a longer-coverage address for new payment instructions.</p>}
+      {entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}, {new Date(entry.retiredAt.mtp * 1000).toISOString().slice(0, 10)} UTC. Receiving is permanently disabled.</p>}
+      <div className="buttons">
+        {!entry.retiredAt && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => void run(async () => { const fresh = await reload(); if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked); assertReceivable(fresh.book.find(x => x.keyID === entry.keyID)!, fresh.coverage.stage); await navigator.clipboard.writeText(entry.address); setMessage('Address copied. Include its coverage information when sharing.'); })}>Copy address</button>}
+        {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use this address</button>}
+        <button disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check retained funds' : 'Get Balance'}</button>
+        <button disabled={disabled || !coins?.length || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Import Money</button>
+      </div>
+      <p>{coins === undefined ? 'Funds not checked in this session.' : `${entry.retiredAt ? 'Verified retained funds' : 'Verified unspent funds'}: ${money(coins.reduce((sum, coin) => sum + coin.satoshis, 0))}`}</p>
+      <details><summary>Address details</summary><p>Key ID {entry.keyID}. Address filter satisfied through stage {lastCoveredStage(entry.address)}. Transaction eligibility also affects receiving.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside the coverage rules, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership or actual unspent funds.</p>}</details>
+    </article>
+  }
+
+  return <main>
+    <header><h1>Mountaintops</h1><p>Shout your BSV transactions from the mountaintops.<br /><strong>Absolutely no privacy!</strong></p></header>
+    <section><h2>Your receiving addresses</h2><p>Coverage deadlines apply to receiving and free lookups. Your coins remain yours after an address expires.</p>
+      {!session ? <><button disabled={disabled} onClick={() => void run(async () => { await reload(null); setMessage('Address history loaded from your BRC-100 wallet. No browser data is needed.'); })}>Show My BSV Address</button><p>Connect your BRC-100 wallet. Recovery records use encrypted on-chain PushDrop tokens in your wallet’s basket. Saving records uses a 1-satoshi token plus network fees; your wallet controls approval. Mountaintops has no application server.</p></> : <>
+        <p className="small">{session.network} · coverage through block {session.coverage.height.toLocaleString()}{session.network === 'mainnet' && ` · stage ${session.coverage.stage}`}</p>
+        {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
+        {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
+        {primary ? card(primary, true) : <p className="expiry-warning">No eligible receiving address selected. Find or select one below. Historical coins remain accessible.</p>}
+        <div className="mining"><h3>Find longer coverage</h3><p>Suggested work budget: 30 seconds. Longer coverage can take more time. Publishing an address or saving progress creates an encrypted wallet record and incurs network fees.</p>
+          <label>Search target<select value={target} disabled={disabled} onChange={e => setTarget(e.target.value)}><option value="auto">Suggested for this device · about 30 seconds</option>{stages.slice(1, 21).map(row => <option key={row.stage} value={row.stage}>Stage {row.stage} · {row.compactAddressRule}</option>)}</select></label>
+          {searching ? <button onClick={cancelMine}>Pause search</button> : <button disabled={disabled || session.network !== 'mainnet'} onClick={() => void mine()}>Find longer-coverage address</button>}
+          {foundEntry && <div><p>Found and saved. Review before switching:</p>{card(foundEntry)}</div>}
+        </div><h3>Previous and saved addresses</h3><p>Previous addresses can receive until their own expiration. Expired addresses are kept for historical access.</p>
+        {session.book.filter(x => x.keyID !== primary?.keyID && x.keyID !== foundEntry?.keyID).map(x => card(x))}
+        <button disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Coverage and wallet records refreshed.') })}>Refresh coverage</button>
+      </>}
+    </section>
+    {message && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}
+    {session && <>
+      {pendingActions.length > 0 && <section className="warning"><h2>Review unfinished wallet actions</h2><p>Check wallet history before sending again. The wallet may already be retrying a submission.</p>{pendingActions.map(action => <div key={String(action.id)}><p>{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p><button disabled={disabled} onClick={() => void run(async () => {
+        const fresh = await reload()
+        if (action.state === 'prepared' && typeof action.reference === 'string') {
+          const aborted = await client.abortAction({ reference: action.reference })
+          if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
+          await fresh.store.append('action', { id: action.id, state: 'canceled' })
+        } else {
+          const page = await client.listActions({ labels: [`mountaintops request ${String(action.id)}`], limit: 100 })
+          if (!page.actions.length || page.actions.some(x => !['completed', 'failed'].includes(x.status))) throw new Error('Wallet has not established a final outcome. Do not retry this payment.')
+          await fresh.store.append('action', { id: action.id, state: 'reviewed in wallet' })
+        }
+        await reload(fresh); setMessage('Wallet action state checked.')
+      })}>{action.state === 'prepared' ? 'Cancel unsubmitted preparation' : 'Check wallet outcome'}</button></div>)}</section>}
+      <section><h2>SHOUT BSV Across To Someone</h2><p>Pay from your connected wallet. Expired destinations are blocked. Wallet network fees apply.</p><label>Recipient Address<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} autoComplete="off" spellCheck={false} /></label><label>Amount (BSV)<input value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} inputMode="decimal" /></label><button className="accent" disabled={disabled || pendingActions.length > 0 || !recipient || !amount} onClick={send}>SHOUT BSV</button>{txid && <p className="transaction">Submitted TXID: {txid}</p>}<p className="small">Submission, confirmation and exchange credit are separate. Check wallet history after an uncertain outcome before another send.</p></section>
+      <section><h2>Shouted Transactions</h2><button disabled={disabled} onClick={loadHistory}>Load wallet history</button>{history.map(x => <p className="transaction" key={x.txid}>{x.description} · {x.status}<br />{x.txid}</p>)}</section>
+    </>}
+    <section><h2>About expiration and recovery</h2><details><summary>What expires?</summary><p>An address stops being available for receiving here when it leaves BRC-234 coverage. New-deposit lookups stop. Ownership and spending/importing existing coins remain intact. Do not send to expired addresses from any application.</p></details><details><summary>Can I use a new device?</summary><p>Restore the same BRC-100 wallet account and connect here. Encrypted PushDrop records in its basket recover your addresses and retirement history; the wallet retains coin evidence. No browser data or exports from the original device are needed. Keep your wallet account and its own recovery/storage service available.</p></details><details><summary>Why isn’t the sunset a fixed date?</summary><p>BRC-234 begins at mainnet block 1,000,000. Transitions also depend on volume and chain-time waiting periods. An eligibility gate differs from actual expiration.</p></details><details><summary>Does mining guarantee every payment is covered?</summary><p>Coverage also depends on the confirmed funding TXID and, from stage 13, version 1. The app prepares eligible payments within a bounded work budget. External senders may create payments outside those rules. A filtered ledger total is never treated as spendable money.</p></details></section>
+    <footer>Powered by your BRC-100 wallet and <a href="https://whatsonchain.com" target="_blank" rel="noreferrer">WhatsOnChain</a>. <a href="https://docs.projectbabbage.com/docs/metanet-client/funding" target="_blank" rel="noreferrer">Funding and exchange guide</a></footer>
+  </main>
+}

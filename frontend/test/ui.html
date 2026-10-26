@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Mountaintops isolated UI fixture</title></head><body><div id="root"></div><script type="module">
+import { FixtureWallet } from './fixtureWallet.mjs'
+import { WalletRecords } from '../src/walletRecords.ts'
+const wallet = new FixtureWallet()
+window.CWI = wallet
+window.fetch = async (input) => {
+  const url = String(input)
+  if (url.includes('/chain/info')) return Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  if (url.includes('/unspent/all') || url.includes('/confirmed/history')) return Response.json({ address: url.split('/address/')[1].split('/')[0], result: [], error: '' })
+  throw new Error('Unexpected fixture network request: ' + url)
+}
+if (new URL(location.href).searchParams.has('expired')) {
+  const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const store = new WalletRecords(wallet, identity, 'mainnet')
+  await store.append('retirement', { keyID: '1', boundary: { height: 1000002, hash: 'f'.repeat(64), mtp: 1920000000, lastReceiveHeight: 1000001 } })
+}
+await import('../src/main.tsx')
+</script></body></html>

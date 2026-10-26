@@ -1,26 +1,20 @@
-import ScriptTemplate from '@bsv/sdk/script/ScriptTemplate'
-import LockingScript from '@bsv/sdk/script/LockingScript'
-import UnlockingScript from '@bsv/sdk/script/UnlockingScript'
-import Signature from '@bsv/sdk/primitives/Signature'
-import Transaction from '@bsv/sdk/transaction/Transaction'
-import TransactionSignature from '@bsv/sdk/primitives/TransactionSignature'
-import { sha256 } from '@bsv/sdk/primitives/Hash'
-import { WalletInterface } from '@bsv/sdk/wallet/Wallet.interfaces'
-import { toArray } from '@bsv/sdk/primitives/utils'
+import { UnlockingScript, Signature, TransactionSignature, Hash, Utils, P2PKH, PublicKey, type Transaction, type WalletInterface } from '@bsv/sdk'
+import { canonicalKeyID } from '../../shared/brc234.ts'
 
 function verifyTruthy<T>(v: T | undefined): T {
     if (v == null) throw new Error('must have value')
     return v
 }
 
-export default class Importer implements ScriptTemplate {
-    lock!: () => LockingScript | Promise<LockingScript>
+export default class Importer {
     unlock(
-        client: WalletInterface
+        client: WalletInterface,
+        keyID = '1'
     ): {
         sign: (tx: Transaction, inputIndex: number) => Promise<UnlockingScript>
         estimateLength: () => Promise<108>
     } {
+        canonicalKeyID(keyID)
         return {
             sign: async (tx: Transaction, inputIndex: number) => {
                 let signatureScope = TransactionSignature.SIGHASH_FORKID
@@ -56,6 +50,15 @@ export default class Importer implements ScriptTemplate {
                     )
                 }
 
+                const { publicKey } = await client.getPublicKey({
+                    protocolID: [1, 'mountaintops'], keyID,
+                    counterparty: 'anyone', forSelf: true
+                })
+                const expectedScript = new P2PKH().lock(PublicKey.fromString(publicKey).toAddress()).toHex()
+                if (lockingScript.toHex() !== expectedScript) {
+                    throw new Error('The input script does not match its Mountaintops key ID')
+                }
+
                 const preimage = TransactionSignature.format({
                     sourceTXID,
                     sourceOutputIndex: verifyTruthy(input.sourceOutputIndex),
@@ -70,11 +73,11 @@ export default class Importer implements ScriptTemplate {
                     scope: signatureScope
                 })
 
-                const hashToSign = sha256(sha256(preimage))
+                const hashToSign = Hash.sha256(Hash.sha256(preimage))
                 const { signature } = await client.createSignature({
                     hashToDirectlySign: hashToSign,
                     protocolID: [1, 'mountaintops'],
-                    keyID: '1',
+                    keyID,
                     counterparty: 'anyone'
                 })
                 const rawSignature = Signature.fromDER(signature)
@@ -84,13 +87,7 @@ export default class Importer implements ScriptTemplate {
                     signatureScope
                 )
                 const sigForScript = sig.toChecksigFormat()
-                const { publicKey } = await client.getPublicKey({
-                    protocolID: [1, 'mountaintops'],
-                    keyID: '1',
-                    counterparty: 'anyone',
-                    forSelf: true
-                })
-                const pubkeyForScript = toArray(publicKey, 'hex')
+                const pubkeyForScript = Utils.toArray(publicKey, 'hex')
                 return new UnlockingScript([
                     { op: sigForScript.length, data: sigForScript },
                     { op: pubkeyForScript.length, data: pubkeyForScript }

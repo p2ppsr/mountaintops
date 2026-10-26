@@ -1,61 +1,57 @@
-# BSV Project
+# Mountaintops
 
-Standard BSV project structure.
+A client-only BRC-100 wallet application at [mountaintops.net](https://mountaintops.net). Static files are served through the existing CARS frontend project. Mountaintops has no application API, registry server, database, or deposit-watching service.
 
-Helpful Links:
+## Receiving, expiration and recovery
 
-- [LARS (for local development)](https://github.com/bitcoin-sv/lars)
-- [CARS CLI (for cloud deployment)](https://github.com/bitcoin-sv/cars-cli)
-- [RUN YOUR OWN CARS NODE](https://github.com/bitcoin-sv/cars-node)
-- [Specification for deployment-info.json](https://github.com/bitcoin-sv/BRCs/blob/master/apps/0102.md)
+The original address keeps the exact `[1, 'mountaintops']`, decimal key ID `1`, counterparty `anyone`, `forSelf: true` derivation. Browser workers search canonical decimal key IDs from `1` upward, returning the first match for a fixed BRC-234 target. The suggested target uses a measured 30-second, 95th-percentile work estimate; each work slice is bounded to 30 seconds. A match is saved before display and requires an explicit **Use this address** selection. Pausing saves verified search progress through the wallet. Restarting without a checkpoint simply repeats deterministic work.
 
-## Getting Started
+Address publications, primary selections, search progress, permanent receiving retirements, chain checkpoints, bounded-history completion and action outcomes are immutable encrypted on-chain PushDrop records using SDK `LocalKVStore` in wallet basket `mntops v1`. Each record uses a 1-satoshi output plus network fees and the wallet's permission flow. There are no certificate APIs or certificate storage. Independent random record keys allow concurrent-device records to merge without overwriting another device's address history. A published address is never acknowledged until the wallet can read its record back.
 
-- Clone this repository
-- Run `npm i` to install dependencies
-- Run `npm run lars` to configure the local environment according to your needs
-- Use `npm run start` to spin up and start writing code
-- When you're ready to publish your project, start by running `npm run cars` and configuring one (or, especially for overlays, ideally multiple) hosting provider(s)
-- For each of your configurations, execute `npm run build` to create CARS project artifacts
-- Deploy with `npm run deploy` and your project will be online
-- Use `cars` interactively, or visit your hosting provider(s) web portals, to view logs, configure custom domains, and pay your hosting bills
-- Share your new BSV project, it is now online!
+Restore the same BRC-100 wallet account and its supported storage/recovery service on any device. Browser storage, the old device, an open tab, manually saved key IDs and exports are not recovery dependencies. The original address can be reconstructed without a storage transaction. As with other BRC-100 applications, the wallet account and its storage service must remain available.
 
-## WhatsOnChain access
+At its first recorded exclusion, an address is permanently **Expired — do not send coins to this address**. Copy, receiving selection and payments to retired/expired destinations are blocked. Retirement does not remove ownership or disable imports of existing funds. There is no override. Pending contractions are checked before payment submission. External applications can still send on chain; Mountaintops cannot prevent that or promise discovery of new post-expiration deposits.
 
-The frontend uses WhatsOnChain's anonymous API tier and does not require an API key. All WhatsOnChain reads share a client-side limit of three requests per second. Safe reads retry rate-limit and transient server responses with bounded exponential backoff and jitter, and honor a reasonable `Retry-After` value when one is returned.
+Explicit balance checks of eligible addresses use existing WhatsOnChain discovery. After expiration there are no live unspent-address queries or background address polls. A first-returning user can perform one bounded, ascending confirmed-history bootstrap, stopping at the last pre-expiration height. Its completion is saved only after coin evidence is acknowledged by the wallet. Subsequent checks use wallet-retained BEEF and exact known-outpoint status. Known pending TXIDs and orphaned proofs can be resolved without reopening address discovery. Errors and incomplete provider responses never become a zero balance.
 
-If an authorization credential is added by an embedding environment and WhatsOnChain rejects it with `401` or `403`, the frontend retries anonymously and omits that credential for the remainder of the browser session.
+Coin evidence and per-input derivation metadata are retained in the `mountaintops receipts v1` wallet basket. Imports validate scripts, satoshis, canonical proofs and actual unspentness; each custom input is signed with its own key ID. Wallet-added inputs stay under the wallet's signer. A filtered BRC-234 ledger total is never used as a spendable balance.
 
-## Directory Structure
+## BRC-234 rules and payment construction
 
-The project structure is roughly as follows, although it can vary by project.
+`shared/schedule.json` pins the normative schedule at BRC document blob `85eaa6219cec77350170d52d243e65122e453d39` ([merged proposal](https://github.com/bsv-blockchain/BRCs/blob/068e4b5eac90ebbe726fb067682bf72aadafa4ff/opinions/0234.md)). Mainnet block 1,000,000 establishes the MTP anchor. Calendar gates alone are not expiration dates: all-version non-coinbase volume, frozen pending rounds, the 14-MTP-day notice and following-block activation also apply. Coverage is replayed from parent-linked WoC block evidence and wallet checkpoints; reorged checkpoints are discarded. Initial catch-up after the anchor can be lengthy. Testnet has no fabricated mainnet sunset.
 
-```
-| - deployment-info.json
-| - package.json
-| - local-data/
-| - frontend/
-  | - package.json
-  | - webpack.config.js
-  | - src/...
-  | - public/...
-  | - build/...
-| - backend/
-  | - package.json
-  | - tsconfig.json
-  | - mod.ts
-  | - src/
-    | - contracts/...
-    | - lookup-services/...
-    | - topic-managers/...
-    | - script-templates/...
-  | - artifacts/
-  | - dist/
+Address, TXID and script-hash predicates are independent. The app displays funding coverage at confirmation without discarding coins outside those rules. Payments/imports prepare version-1 transactions with supported wallet APIs, bounded nonce variation, `noSend` signing, final-template and final-TXID inspection, fresh coverage checks, and one explicit `sendWith` submission. Candidate payment outputs are never changed to grind. Abandoned candidates are aborted. The wallet may ask for permissions; metadata records have their own fees. The payment work budget is 30 seconds; a match at broadcast remains provisional until confirmation.
+
+Action intent/outcome records and unique wallet labels support recovery after an interrupted submission. An uncertain outcome blocks automatic retries and requires checking wallet history. Out-of-session signable-reference recovery is not assumed. Mountaintops does not promise that a BRC-234 merge proves provider adoption, indefinite WoC availability, complete retrieval of data a provider no longer serves, or external wallet transaction-grinding support. Such failures remain explicit, with retained funds and keys intact.
+
+## Development and validation
+
+Use Node 24:
+
+```sh
+cd frontend
+npm ci
+npm test
+npm run lint
+npm run build
+npm audit --omit=dev --audit-level=moderate
 ```
 
-The one constant is `deployment-info.json`.
+CI runs these checks. Tests use real SDK derivation, signing, encryption, PushDrop and BEEF with disposable synthetic funding. `frontend/test/ui.html` is a development-only isolated wallet/network fixture; `?expired` exercises retirement without using real funds. Vite production builds include only `index.html` and its assets, excluding fixtures.
 
-## License
+All anonymous WoC reads share a three-requests-per-second scheduler with bounded safe-read retries and `Retry-After` handling. No API key is bundled. Wallet retained evidence does not remove the current canonical-root and actual spend-status dependency on WoC. If WoC is unavailable, the app reports an incomplete check instead of treating coins as lost or spendable.
 
-[Open BSV License](./LICENSE.txt)
+## Release and recovery
+
+Production is frontend-only CARS project `1133dd7636b44d50134df01fd7fe5ec1`, configuration `1` in `deployment-info.json`:
+
+```sh
+npm ci
+npx cars doctor 1
+npm run build
+npm run deploy
+```
+
+The root uses current CARS CLI. Releases require operator-owned Evans safety gates, isolated canary rendering/drain qualification, continuous probes of custom and generated domains, exact deployed-asset verification, and two Ready serving endpoints on distinct nodes. `ops/canary.Dockerfile` supports a Linux/amd64 remote qualification image of the same frontend source; it adds no application backend. Deployment records, images, routing, release credentials and rollback evidence belong in network-ops.
+
+After publishing addresses, rollback must preserve this wallet record format, expiration blocks and access to all saved key IDs. Do not roll back to the old single-address frontend. Retain the accepted compatible frontend image and use forward repair or a compatible image rollback; never delete wallet recovery outputs or resume expired-address discovery.
