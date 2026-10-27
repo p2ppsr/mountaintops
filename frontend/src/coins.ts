@@ -5,6 +5,7 @@ import { addressMatches, assertReceivable, canonicalKeyID, transactionMatches } 
 import { validateAddress } from './addressBook.ts'
 import { whatsOnChainFetch } from './whatsOnChainClient.ts'
 import getBeefForTxid from './getBeefForTxid.ts'
+import { RECEIPT_LABEL } from './walletScopes.ts'
 import type { WalletRecords } from './walletRecords.ts'
 
 export const COIN_BASKET = 'mountaintops receipts v1'
@@ -72,7 +73,7 @@ async function retainCoins(wallet: WalletInterface, entry: AddressRecord, coins:
 async function saveCoinEvidence(wallet: WalletInterface, entry: AddressRecord, beef: Beef, outputs: Coin[]): Promise<void> {
     const txid = outputs[0].txid
     await wallet.internalizeAction({
-      tx: beef.toBinaryAtomic(txid), description: 'Retain Mountaintops deposit evidence', labels: ['mountaintops receipts v1'],
+      tx: beef.toBinaryAtomic(txid), description: 'Retain Mountaintops deposit evidence', labels: [RECEIPT_LABEL],
       outputs: outputs.map(coin => ({ outputIndex: coin.vout, protocol: 'basket insertion', insertionRemittance: {
         basket: COIN_BASKET, tags: [`address ${entry.address}`], customInstructions: JSON.stringify({ v: 1, network: entry.network, ...coin })
       } }))

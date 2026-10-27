@@ -1,0 +1,96 @@
+{
+  "id": "/",
+  "name": "Mountaintops",
+  "short_name": "Mountaintops",
+  "description": "Receive and send public BSV payments with your BRC-100 wallet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#142630",
+  "background_color": "#101b23",
+  "icons": [
+    {
+      "src": "/mountaintops-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/mountaintops-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/mountaintops.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "metanet": {
+    "schemaVersion": 1,
+    "groupPermissions": {
+      "description": "Use Mountaintops to recover addresses and payments, save receiving choices, and send BSV.",
+      "protocolPermissions": [
+        {
+          "protocolID": [
+            1,
+            "identity key retrieval"
+          ],
+          "description": "Restore the addresses belonging to your wallet account."
+        },
+        {
+          "protocolID": [
+            1,
+            "mountaintops"
+          ],
+          "description": "Derive your receiving addresses and sign imports of your coins."
+        },
+        {
+          "protocolID": [
+            2,
+            "mntops v1"
+          ],
+          "counterparty": "self",
+          "description": "Encrypt, sign, verify, and recover your saved addresses, receiving choice, and recovery records."
+        },
+        {
+          "protocolID": [
+            1,
+            "action label mountaintops actions v1"
+          ],
+          "description": "Find unfinished Mountaintops actions and prevent duplicate payments."
+        },
+        {
+          "protocolID": [
+            1,
+            "action label mountaintops record v1"
+          ],
+          "description": "Identify saved address and recovery records."
+        },
+        {
+          "protocolID": [
+            1,
+            "action label mountaintops receipts v1"
+          ],
+          "description": "Identify retained payment evidence for your addresses."
+        }
+      ],
+      "basketAccess": [
+        {
+          "basket": "mntops v1",
+          "description": "Read and save encrypted address and recovery records."
+        },
+        {
+          "basket": "mountaintops receipts v1",
+          "description": "Retain and recover transaction evidence for coins sent to your addresses."
+        }
+      ],
+      "spendingAuthorization": {
+        "amount": 100000,
+        "description": "Allow up to 100,000 satoshis per month for BSV payments and wallet/network fees. Amounts above the allowance need separate wallet approval."
+      }
+    }
+  }
+}

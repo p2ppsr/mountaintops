@@ -1,6 +1,7 @@
 import { Transaction, type WalletInterface } from '@bsv/sdk'
 import type { Network } from '../../shared/brc234.ts'
 import { assertInputsUnspent } from './inputChecks.ts'
+import { ACTION_LABEL, RECORD_LABEL } from './walletScopes.ts'
 
 type Prepared = { tx: Transaction; txid?: string; submitted: boolean }
 
@@ -19,7 +20,7 @@ export class RecordActions {
     this.wallet = new Proxy(original, { get: (target, property) => {
       if (property === 'createAction') return async (...[args, originator]: Parameters<WalletInterface['createAction']>) => {
         if (args.options?.signAndProcess !== false || args.options?.sendWith?.length) throw new Error('Wallet record must be prepared before submission.')
-        const result = await original.createAction({ ...args, labels: [...(args.labels ?? []), 'mountaintops actions v1', 'mountaintops record v1', `mountaintops request ${crypto.randomUUID()}`], options: { ...args.options, noSend: true, returnTXIDOnly: false } }, originator)
+        const result = await original.createAction({ ...args, labels: [...(args.labels ?? []), ACTION_LABEL, RECORD_LABEL], options: { ...args.options, noSend: true, returnTXIDOnly: false } }, originator)
         if (result.signableTransaction) this.prepared.set(result.signableTransaction.reference, { tx: Transaction.fromAtomicBEEF(result.signableTransaction.tx), submitted: false })
         return result
       }

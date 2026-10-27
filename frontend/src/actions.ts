@@ -7,6 +7,7 @@ import Importer from './Importer.ts'
 import type { WalletRecords } from './walletRecords.ts'
 import { assertInputsUnspent } from './inputChecks.ts'
 import { unfinishedWalletActions } from './walletActionState.ts'
+import { ACTION_LABEL } from './walletScopes.ts'
 export { unfinishedWalletActions } from './walletActionState.ts'
 
 export function parseSatoshis(bsv: string): number {
@@ -34,8 +35,6 @@ export function assertSameTemplate(before: Transaction, after: Transaction): voi
 // external coins. Signed noSend actions can be aborted by TXID on a fresh device.
 
 export async function eligibleAction(wallet: WalletInterface, store: WalletRecords, args: CreateActionArgs, coverage: Coverage, progress: Progress, coins: Coin[] = [], recipient?: string): Promise<string> {
-  const id = crypto.randomUUID()
-  const requestLabel = `mountaintops request ${id}`
   if ((await unfinishedWalletActions(wallet, store.network)).length) throw new Error('Review the unfinished wallet action before another payment.')
   let reference: string | undefined
   let signedTxid: string | undefined
@@ -45,7 +44,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
     let nonce = 0
     while (performance.now() - started < 30_000) {
       progress(`Preparing an eligible transaction (attempt ${nonce + 1}). Your wallet may request permission; payment fees apply to the submitted payment.`)
-      const prepared = await wallet.createAction({ ...args, version: 1, lockTime: nonce++, labels: [...(args.labels ?? []), 'mountaintops actions v1', requestLabel], options: { signAndProcess: false, noSend: true, returnTXIDOnly: false, randomizeOutputs: false } })
+      const prepared = await wallet.createAction({ ...args, version: 1, lockTime: nonce++, labels: [...(args.labels ?? []), ACTION_LABEL], options: { signAndProcess: false, noSend: true, returnTXIDOnly: false, randomizeOutputs: false } })
       if (!prepared.signableTransaction) throw new Error('The wallet did not return a signable transaction; no automatic retry is safe.')
       reference = prepared.signableTransaction.reference
       const tx = Transaction.fromAtomicBEEF(prepared.signableTransaction.tx)
