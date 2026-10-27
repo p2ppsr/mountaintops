@@ -58,7 +58,9 @@ export async function applyExpirations(book: AddressRecord[], coverage: Coverage
 }
 
 export function primaryFromRecords(book: AddressRecord[], records: RecoveryRecord[], stage: number): string | null {
-  const selected = records.filter(x => x.kind === 'primary').at(-1)?.data.keyID ?? '1'
+  // A new address and its selection share one encrypted publication record.
+  // Legacy separate selection records still participate in the same order.
+  const selected = records.filter(x => x.kind === 'primary' || (x.kind === 'address' && x.data.useForReceiving === true)).at(-1)?.data.keyID ?? '1'
   const entry = book.find(x => x.keyID === selected)
   if (!entry) return null
   try { assertReceivable(entry, stage); return entry.keyID } catch { return null }

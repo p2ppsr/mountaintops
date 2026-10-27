@@ -27,7 +27,6 @@ export default function Mountaintops() {
   const [balances, setBalances] = useState<Record<string, Coin[] | undefined>>({})
   const [view, setView] = useState<'receive' | 'send'>('receive')
   const [target, setTarget] = useState('auto')
-  const [found, setFound] = useState<string | null>(null)
   const [candidate, setCandidate] = useState<{ stage: number; keyID: string; address: string } | null>(null)
   const [pausedSearch, setPausedSearch] = useState<{ stage: number; next: string } | null>(null)
   const [recipient, setRecipient] = useState('')
@@ -55,7 +54,7 @@ export default function Mountaintops() {
     const { network } = await client.getNetwork({})
     const { publicKey: identity } = await client.getPublicKey({ identityKey: true })
     if (previous && (previous.identity !== identity || previous.network !== network)) {
-      setSession(null); setBalances({}); setFound(null); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
+      setSession(null); setBalances({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
       throw new Error('Wallet account or network changed. Connect again to load its own records.')
     }
     const store = previous?.store ?? new WalletRecords(client, identity, network)
@@ -94,9 +93,10 @@ export default function Mountaintops() {
       if (fresh.network === 'mainnet' && !addressMatches(result.address, fresh.coverage.stage)) throw new Error('Found address has expired. Choose a stricter target.')
       const expected = await client.getPublicKey({ protocolID: [1, 'mountaintops'], keyID: result.keyID, counterparty: 'anyone', forSelf: true })
       if (PublicKey.fromString(expected.publicKey).toAddress(fresh.network) !== result.address) throw new Error('Mined public key does not match the wallet')
-      if (!existing) await fresh.store.append('address', { keyID: result.keyID, address: result.address, targetStage: result.stage })
-      await reload(fresh); setFound(result.keyID); setCandidate(null)
-      setMessage('Address saved. Select “Use for receiving” to switch to it.')
+      if (!existing) await fresh.store.append('address', { keyID: result.keyID, address: result.address, targetStage: result.stage, useForReceiving: true })
+      else if (fresh.primary !== result.keyID) await fresh.store.append('primary', { keyID: result.keyID })
+      await reload(fresh); setCandidate(null)
+      setMessage('New address saved and ready to receive.')
     })
   }
 
@@ -111,7 +111,7 @@ export default function Mountaintops() {
       const saved = fresh.records.filter(x => x.kind === 'search' && x.data.stage === chosen).at(-1)
       const resume = pausedSearch && pausedSearch.stage === chosen ? pausedSearch.next : saved?.data.next
       const nextWorker = new Worker(new URL('./miner.worker.ts', import.meta.url), { type: 'module' })
-      worker.current = nextWorker; searchProgress.current = null; setSearching(true); setFound(null); setCandidate(null); setPausedSearch(null)
+      worker.current = nextWorker; searchProgress.current = null; setSearching(true); setCandidate(null); setPausedSearch(null)
       nextWorker.onmessage = ({ data }) => {
         if (worker.current !== nextWorker) return
         if (data.kind === 'started') setMessage(`Finding an address… up to 30 seconds.`)
@@ -145,13 +145,22 @@ export default function Mountaintops() {
     if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
     if (!entry) throw new Error('Address not found')
     assertReceivable(entry, fresh.coverage.stage)
-    await fresh.store.append('primary', { keyID }); await reload(fresh); setFound(null); setMessage('Receiving address updated.')
+    if (fresh.primary !== keyID) await fresh.store.append('primary', { keyID })
+    await reload(fresh); setMessage('Receiving address updated.')
   })
   const checkCoins = (keyID: string) => void run(async () => {
     const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)!
     const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
     setBalances(x => ({ ...x, [keyID]: coins })); await reload(fresh)
-    setMessage('Payments checked. Recovery evidence is saved in your wallet.')
+    setMessage('Payments checked.')
+  })
+  const checkAllCoins = () => void run(async () => {
+    const fresh = await reload()
+    for (const entry of fresh.book) {
+      const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
+      setBalances(x => ({ ...x, [entry.keyID]: coins }))
+    }
+    await reload(fresh); setMessage('Payments checked.')
   })
   const importMoney = (keyID: string) => void run(async () => {
     const fresh = await reload()
@@ -176,8 +185,7 @@ export default function Mountaintops() {
 
   const disabled = busy || searching
   const primary = session?.book.find(x => x.keyID === session.primary)
-  const foundEntry = session?.book.find(x => x.keyID === found)
-  const suggestedEntry = !foundEntry && !candidate && !pausedSearch && !searching && session?.book.filter(x => !x.retiredAt && lastCoveredStage(x.address) > (primary ? lastCoveredStage(primary.address) : -1)).sort((a, b) => lastCoveredStage(b.address) - lastCoveredStage(a.address))[0]
+  const suggestedEntry = !candidate && !pausedSearch && !searching && session?.book.filter(x => !x.retiredAt && lastCoveredStage(x.address) > (primary ? lastCoveredStage(primary.address) : -1)).sort((a, b) => lastCoveredStage(b.address) - lastCoveredStage(a.address))[0]
   const pendingActions = session ? unresolvedActions(session.records) : []
   const savedSearches = session ? [...new Map(session.records.filter(x => x.kind === 'search').map(x => [Number(x.data.stage), x.data])).values()]
     .filter(x => Number(x.stage) > Math.max(...session.book.map(entry => lastCoveredStage(entry.address)))) : []
@@ -202,8 +210,8 @@ export default function Mountaintops() {
         {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use for receiving</button>}
       </div>
       {!entry.retiredAt && !selected && <p className="small fee-note">Wallet fees apply when switching addresses.</p>}
-      <div className="funds-row"><div>{total !== undefined ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">Payments</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
-      {Boolean(coins?.length) && <div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>}
+      {!selected && <><div className="funds-row"><div>{total !== undefined ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">Payments</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
+      {Boolean(coins?.length) && <div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>}</>}
       <details className="technical"><summary>Address details</summary><p>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>{entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}. New-deposit lookups have stopped permanently.</p>}<p>Key ID {entry.keyID} · address rules satisfied through stage {level}. Payment transaction rules also apply.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside coverage, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership.</p>}</details>
     </article>
   }
@@ -228,23 +236,28 @@ export default function Mountaintops() {
       {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
       {view === 'receive' ? <section className="receive-panel" aria-label="Receive BSV">
         {primary ? card(primary, true) : <div className="empty-state"><h2>Choose a receiving address</h2><p>Find a new address or choose an active one below. Earlier payments remain yours.</p></div>}
+        <div className="payments-panel"><div className="section-heading"><h3>Payments to your addresses</h3><button className="secondary" disabled={disabled} onClick={checkAllCoins}>Check payments</button></div>
+          {session.book.every(x => balances[x.keyID] !== undefined) ? <p className="small">All addresses checked this session.</p> : <p className="small">Check here for payments to current and earlier addresses.</p>}
+          {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong><span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span></div><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button></div>)}
+          {session.book.some(x => balances[x.keyID]?.length) && <p className="small">Wallet fees apply when moving coins.</p>}
+          {session.book.every(x => balances[x.keyID] !== undefined && balances[x.keyID]?.length === 0) && <p className="small">No available payments found.</p>}
+        </div>
         <div className="mining"><div className="section-heading"><div><h3>A longer-lasting address</h3><p className="small">{suggestedEntry ? 'Saved in your wallet. Fees apply to switch.' : 'Free to find. Wallet fees apply to save it.'}</p></div>{searching ? <button className="secondary" onClick={cancelMine}>Pause</button> : <button disabled={disabled || session.network !== 'mainnet'} onClick={() => suggestedEntry ? choose(suggestedEntry.keyID) : void mine()}>{suggestedEntry ? 'Use saved address' : pausedSearch ? 'Keep searching' : 'Find an address'}</button>}</div>
           {suggestedEntry && <code className="address saved-preview">{suggestedEntry.address}</code>}
           {searching && <p className="notice" role="status">{message}</p>}
-          {candidate && <div className="result"><h3>New address found</h3><p>Save it so you can recover it on any device.</p><button disabled={disabled} onClick={() => void publishFound(candidate)}>Save address</button><span className="small fee-note">Wallet fees apply. Your receiving address will stay the same.</span></div>}
-          {foundEntry && foundEntry.keyID !== primary?.keyID && <div className="result"><p className="result-title">Saved. Ready to use.</p>{card(foundEntry)}</div>}
+          {candidate && <div className="result"><h3>New address found</h3><p>Save it so you can recover it on any device.</p><button disabled={disabled} onClick={() => void publishFound(candidate)}>Save &amp; use address</button><span className="small fee-note">Wallet fees apply. No separate switching fee.</span></div>}
           <details className="advanced"><summary>Advanced search</summary><p className="small">Search runs for up to 30 seconds at a time. Higher stages take more work and pass stricter future address rules.</p>{suggestedEntry && <button disabled={disabled} onClick={() => void mine()}>Find another address</button>}<label>Search target<select value={target} disabled={disabled} onChange={e => setTarget(e.target.value)}><option value="auto">Recommended · about 30 seconds</option>{stages.slice(1).map(row => <option key={row.stage} value={row.stage}>Stage {row.stage} · {row.compactAddressRule}</option>)}</select></label>
             {pausedSearch && <><button disabled={disabled} onClick={() => void run(async () => { const fresh = await reload(); await fresh.store.append('search', pausedSearch); await reload(fresh); setMessage('Search progress saved in your wallet.') })}>Save progress</button><p className="small">Wallet fees apply. Otherwise you can repeat this search on another device for free.</p></>}
             {!searching && savedSearches.map(search => <p key={String(search.stage)}><button disabled={disabled} onClick={() => { setTarget(String(search.stage)); void mine(Number(search.stage)) }}>Resume stage {String(search.stage)}</button> <span className="small">Saved in your wallet · next key ID {String(search.next)}</span></p>)}
           </details>
         </div>
-        <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Each address has its own expiration. Expired addresses cannot receive; earlier payments remain yours.</p>{session.book.filter(x => x.keyID !== primary?.keyID && x.keyID !== foundEntry?.keyID).map(x => card(x))}<button className="secondary" disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Addresses and expiration checked.') })}>Refresh addresses</button></details>
+        <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Each address has its own expiration. Expired addresses cannot receive; earlier payments remain yours.</p>{session.book.filter(x => x.keyID !== primary?.keyID).map(x => card(x))}<button className="secondary" disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Addresses and expiration checked.') })}>Refresh addresses</button></details>
         <p className="ownership-note">An address can expire. Your coins are still yours.</p>
       </section> : <section className="send-panel"><h2>Send BSV</h2><p className="small">Public payment · wallet fees apply</p><label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="BSV address" autoComplete="off" spellCheck={false} /></label><label>Amount in BSV<input value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" /></label><button className="accent" disabled={disabled || pendingActions.length > 0 || !recipient || !amount} onClick={send}>Send BSV</button><p className="small">Expired addresses are blocked. Confirm the result in your wallet before retrying.</p>{txid && <p className="transaction">Submitted: {txid}</p>}</section>}
       <details className="activity"><summary>Activity this session <span className="count">{history.length}</span></summary><p className="small">Clears when you leave. Your wallet keeps its own payment records.</p>{!history.length && <p className="small">No payments yet.</p>}{history.map(x => <p className="transaction" key={x.txid}>{x.description} · {x.status}<br />{x.txid}</p>)}</details>
     </>}
     {!session && error && <p className="error" role="alert">{error}</p>}
-    <details className="help"><summary>Expiration, fees & recovery</summary><h3>When does my address expire?</h3><p>The date depends on BRC-234 chain conditions. Until it is known, each address shows “Expiration date not set yet.” Address details show its exact stage and eligibility gate. A gate is not a guaranteed expiration date.</p><p>When an address expires, stop using it everywhere. Mountaintops disables receiving and stops looking for new deposits. Earlier coins remain yours and can still be moved to your wallet.</p><h3>Can I recover on another device?</h3><p>Connect the same BRC-100 wallet account. Your saved addresses and coin evidence come from the wallet, without browser data or files from this device. Keep your wallet account and its recovery service available.</p><h3>What costs money?</h3><p>Searching and pausing are free. Saving an address or search progress, and switching your receiving address, create encrypted 1-satoshi records in your wallet. Network and wallet service fees may apply. Moving or sending coins also incurs wallet fees.</p><h3>Does a longer-lasting address cover every payment?</h3><p>No. Funding TXID rules also apply, and from stage 13 the transaction must use version 1. Mountaintops prepares eligible transactions within a bounded work budget. External senders may create payments outside those rules. Eligibility never changes who owns the coins.</p><details><summary>Technical status</summary>{session && <p>{session.network} · checked through block {session.coverage.height.toLocaleString()} · stage {session.coverage.stage}</p>}<p>Client-only. Encrypted PushDrop recovery records use your BRC-100 wallet’s baskets. WhatsOnChain supplies chain data and historical recovery; unavailable or incomplete data cannot establish a balance.</p></details></details>
+    <details className="help"><summary>Expiration, fees & recovery</summary><h3>When does my address expire?</h3><p>The date depends on BRC-234 chain conditions. Until it is known, each address shows “Expiration date not set yet.” Address details show its exact stage and eligibility gate. A gate is not a guaranteed expiration date.</p><p>When an address expires, stop using it everywhere. Mountaintops disables receiving and stops looking for new deposits. Earlier coins remain yours and can still be moved to your wallet.</p><h3>Can I recover on another device?</h3><p>Connect the same BRC-100 wallet account. Your saved addresses and coin evidence come from the wallet, without browser data or files from this device. Keep your wallet account and its recovery service available.</p><h3>What costs money?</h3><p>Searching and pausing are free. Saving a new address also makes it your receiving address in one encrypted 1-satoshi wallet record. Saving search progress or switching to an older saved address each needs its own record so your choice can be recovered on another device. Network and wallet service fees may apply. Moving or sending coins also incurs wallet fees.</p><h3>Does a longer-lasting address cover every payment?</h3><p>No. Funding TXID rules also apply, and from stage 13 the transaction must use version 1. Mountaintops prepares eligible transactions within a bounded work budget. External senders may create payments outside those rules. Eligibility never changes who owns the coins.</p><details><summary>Technical status</summary>{session && <p>{session.network} · checked through block {session.coverage.height.toLocaleString()} · stage {session.coverage.stage}</p>}<p>Client-only. Encrypted PushDrop recovery records use your BRC-100 wallet’s baskets. WhatsOnChain supplies chain data and historical recovery; unavailable or incomplete data cannot establish a balance.</p></details></details>
     <footer><span>Public transactions. No privacy.</span><div><a href="https://whatsonchain.com" target="_blank" rel="noreferrer">WhatsOnChain</a><a href="https://docs.projectbabbage.com/docs/metanet-client/funding" target="_blank" rel="noreferrer">Wallet help</a></div></footer>
   </main>
 }
