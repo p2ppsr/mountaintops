@@ -26,6 +26,20 @@ export function assertSameTemplate(before: Transaction, after: Transaction): voi
     if (BigInt(a.satoshis ?? -1) !== BigInt(b.satoshis ?? -1) || a.lockingScript.toHex() !== b.lockingScript.toHex()) throw new Error('Wallet changed an authorized payment or change output')
   }
 }
+// A wallet signature or balance does not prove its added inputs are unspent.
+export async function assertInputsUnspent(tx: Transaction, network: WalletRecords['network']): Promise<void> {
+  const seen = new Set<string>()
+  for (const input of tx.inputs) {
+    const txid = input.sourceTXID ?? input.sourceTransaction?.id('hex')
+    const vout = input.sourceOutputIndex
+    if (!txid || !/^[a-f0-9]{64}$/.test(txid) || !Number.isSafeInteger(vout) || vout < 0) throw new Error('Wallet omitted input evidence. Payment stopped.')
+    const outpoint = `${txid}.${vout}`
+    if (seen.has(outpoint)) throw new Error('Wallet repeated an input. Payment stopped.')
+    seen.add(outpoint)
+    if (!(await coinIsUnspent({ network }, { txid, vout }))) throw new Error('Your wallet chose coins that have already been spent. Payment stopped. Resolve this in your wallet before trying again.')
+  }
+}
+
 // Native wallet action history is durable before submission and does not need
 // an extra fee-paying record. In particular, an empty wallet can import its first
 // external coins. Signed noSend actions can be aborted by TXID on a fresh device.
@@ -65,6 +79,8 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
       for (const output of args.outputs ?? []) {
         if (tx.outputs.filter(x => x.lockingScript.toHex() === output.lockingScript && BigInt(x.satoshis ?? -1) === BigInt(output.satoshis)).length !== 1) throw new Error('Wallet did not preserve the requested recipient and amount')
       }
+      progress('Checking the wallet’s coins before signing…')
+      await assertInputsUnspent(tx, store.network)
       const spends: SignActionArgs['spends'] = {}
       for (const coin of coins) {
         const indices = tx.inputs.flatMap((input, index) => (input.sourceTXID ?? input.sourceTransaction?.id('hex')) === coin.txid && input.sourceOutputIndex === coin.vout ? [index] : [])
@@ -103,6 +119,9 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         if (store.network === 'mainnet' && !addressMatches(recipient, fresh.stage)) throw new Error('Expired — do not send coins to this address.')
         if (fresh.state?.pending && !addressMatches(recipient, fresh.state.pending.target)) throw new Error('This address expires at the pending transition. Use a longer-coverage destination.')
       }
+      // Permission dialogs and concurrent apps can change the spend state.
+      progress('Checking the wallet’s coins before submission…')
+      await assertInputsUnspent(final, store.network)
       submissionStarted = true
       const result = await wallet.createAction({ description: 'Submit eligible Mountaintops payment', options: { sendWith: [signedTxid], acceptDelayedBroadcast: false, returnTXIDOnly: false } })
       const status = result.sendWithResults?.find(x => x.txid === signedTxid)?.status

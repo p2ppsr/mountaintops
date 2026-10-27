@@ -143,7 +143,7 @@ export async function verifiedEvidence(wallet: WalletInterface, entry: AddressRe
 // This is a known-outpoint query, including after an address expires. A generic
 // failed lookup is never treated as spent, unspent, or zero. The 404 meaning is
 // specific to WoC's documented /tx/:id/:vout/spent contract for a known output.
-export async function coinIsUnspent(entry: AddressRecord, coin: Coin): Promise<boolean> {
+export async function coinIsUnspent(entry: Pick<AddressRecord, 'network'>, coin: Pick<Coin, 'txid' | 'vout'>): Promise<boolean> {
   const response = await whatsOnChainFetch(`${apiBase(entry.network)}/tx/${coin.txid}/${coin.vout}/spent`, { signal: AbortSignal.timeout(30_000) })
   if (response.status === 404) return true
   if (!response.ok) throw new Error(`Spend status unknown (${response.status}); retry the check before importing.`)
