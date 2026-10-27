@@ -1,5 +1,7 @@
 import { LocalKVStore, Utils, type WalletInterface } from '@bsv/sdk'
 import type { Network } from '../../shared/brc234.ts'
+import { RecordActions } from './recordActions.ts'
+import { unfinishedWalletActions } from './walletActionState.ts'
 
 export const RECORD_BASKET = 'mntops v1'
 export type RecoveryRecord = { v: 1; network: Network; kind: 'address' | 'primary' | 'retirement' | 'checkpoint' | 'search' | 'history' | 'action'; clock: number; data: Record<string, unknown>; serial?: string }
@@ -9,12 +11,14 @@ export type RecoveryRecord = { v: 1; network: Network; kind: 'address' | 'primar
 // All discovery and decryption uses the BRC-100 wallet; no browser persistence.
 export class WalletRecords {
   private readonly kv: LocalKVStore
+  private readonly actions: RecordActions
   readonly wallet: WalletInterface
   readonly identityKey: string
   readonly network: Network
   constructor(wallet: WalletInterface, identityKey: string, network: Network) {
     this.wallet = wallet; this.identityKey = identityKey; this.network = network
-    this.kv = new LocalKVStore(wallet, RECORD_BASKET, true, undefined, false)
+    this.actions = new RecordActions(wallet, network)
+    this.kv = new LocalKVStore(this.actions.wallet, RECORD_BASKET, true, undefined, false)
   }
 
   async load(): Promise<RecoveryRecord[]> {
@@ -46,12 +50,20 @@ export class WalletRecords {
   }
 
   async append(kind: RecoveryRecord['kind'], data: RecoveryRecord['data']): Promise<RecoveryRecord[]> {
+    if ((await unfinishedWalletActions(this.wallet, this.network)).length) throw new Error('Resolve the unfinished wallet action before saving more data.')
     const before = await this.load()
     const record: RecoveryRecord = { v: 1, network: this.network, kind, clock: Math.max(0, ...before.map(x => x.clock)) + 1, data }
     const payload = JSON.stringify(record)
     if (payload.length > 64_000) throw new Error('Recovery record is too large')
     const key = `r${Utils.toHex(Array.from(crypto.getRandomValues(new Uint8Array(12))))}`
-    const outpoint = await this.kv.set(key, payload)
+    this.actions.begin()
+    let outpoint: string
+    try { outpoint = await this.kv.set(key, payload); await this.actions.submit(outpoint) }
+    catch (error) {
+      if (this.actions.cleanupFailed) throw new Error('Wallet record cleanup needs review. Open your wallet before trying again.')
+      if (this.actions.error) throw new Error(this.actions.error)
+      throw error
+    }
     if (await this.kv.get(key) !== payload) throw new Error('Wallet did not acknowledge the encrypted recovery record. Do not publish this address.')
     const after = await this.load()
     if (!after.some(x => x.serial === outpoint)) throw new Error('Wallet recovery record could not be read back')

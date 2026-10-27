@@ -4,7 +4,10 @@ import { bookFromRecords, validateAddress } from './addressBook.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { coinIsUnspent, retainedCoins, verifiedEvidence, type Coin } from './coins.ts'
 import Importer from './Importer.ts'
-import type { RecoveryRecord, WalletRecords } from './walletRecords.ts'
+import type { WalletRecords } from './walletRecords.ts'
+import { assertInputsUnspent } from './inputChecks.ts'
+import { unfinishedWalletActions } from './walletActionState.ts'
+export { unfinishedWalletActions } from './walletActionState.ts'
 
 export function parseSatoshis(bsv: string): number {
   if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,8})?$/.test(bsv)) throw new Error('Enter a positive BSV amount with at most 8 decimal places.')
@@ -26,38 +29,9 @@ export function assertSameTemplate(before: Transaction, after: Transaction): voi
     if (BigInt(a.satoshis ?? -1) !== BigInt(b.satoshis ?? -1) || a.lockingScript.toHex() !== b.lockingScript.toHex()) throw new Error('Wallet changed an authorized payment or change output')
   }
 }
-// A wallet signature or balance does not prove its added inputs are unspent.
-export async function assertInputsUnspent(tx: Transaction, network: WalletRecords['network']): Promise<void> {
-  const seen = new Set<string>()
-  for (const input of tx.inputs) {
-    const txid = input.sourceTXID ?? input.sourceTransaction?.id('hex')
-    const vout = input.sourceOutputIndex
-    if (!txid || !/^[a-f0-9]{64}$/.test(txid) || !Number.isSafeInteger(vout) || vout < 0) throw new Error('Wallet omitted input evidence. Payment stopped.')
-    const outpoint = `${txid}.${vout}`
-    if (seen.has(outpoint)) throw new Error('Wallet repeated an input. Payment stopped.')
-    seen.add(outpoint)
-    if (!(await coinIsUnspent({ network }, { txid, vout }))) throw new Error('Your wallet chose coins that have already been spent. Payment stopped. Resolve this in your wallet before trying again.')
-  }
-}
-
 // Native wallet action history is durable before submission and does not need
 // an extra fee-paying record. In particular, an empty wallet can import its first
 // external coins. Signed noSend actions can be aborted by TXID on a fresh device.
-export async function unfinishedWalletActions(wallet: WalletInterface, network: WalletRecords['network']): Promise<RecoveryRecord[]> {
-  const pending: RecoveryRecord[] = []
-  for (let offset = 0; ; offset += 100) {
-    const page = await wallet.listActions({ labels: ['mountaintops actions v1'], includeLabels: true, limit: 100, offset })
-    for (const action of page.actions) {
-      if (!['unsigned', 'nosend', 'nonfinal', 'unprocessed', 'sending', 'unproven'].includes(action.status)) continue
-      const id = action.labels?.find(x => x.startsWith('mountaintops request '))?.slice(21) ?? action.txid
-      const canAbort = action.status === 'nosend' && /^[a-f0-9]{64}$/.test(action.txid)
-      pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
-    }
-    if (offset + page.actions.length >= page.totalActions) break
-    if (page.actions.length !== 100 || offset >= 10000) throw new Error('Wallet action history is incomplete. Check the wallet before another payment.')
-  }
-  return pending
-}
 
 export async function eligibleAction(wallet: WalletInterface, store: WalletRecords, args: CreateActionArgs, coverage: Coverage, progress: Progress, coins: Coin[] = [], recipient?: string): Promise<string> {
   const id = crypto.randomUUID()
