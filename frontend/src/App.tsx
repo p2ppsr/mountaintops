@@ -7,6 +7,7 @@ import { readCoverage, type Coverage } from './coverageClient.ts'
 import { refreshCoins, type Coin } from './coins.ts'
 import { importCoins, sendCoins, unfinishedWalletActions } from './actions.ts'
 import { preferCompatibleTransport } from './walletClient.ts'
+import { assertWalletActionFinal } from './walletActionState.ts'
 import './style.css'
 
 const client = new WalletClient('auto')
@@ -217,7 +218,7 @@ export default function Mountaintops() {
   }
 
   return <main aria-busy={busy || searching}>
-    <header><div className="brand"><span className="mountain-mark" aria-hidden="true">△</span><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
+    <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
     {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={() => void run(async () => { await reload(null); setMessage(''); })}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
       <nav className="view-tabs" aria-label="Payment direction"><button aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
       {pendingActions.length > 0 && <section className="warning"><h2>Check your wallet before continuing</h2><p>A previous payment has no final result yet. Do not send it again.</p>{pendingActions.map(action => <div key={String(action.id)}><details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
@@ -226,8 +227,7 @@ export default function Mountaintops() {
           const aborted = await client.abortAction({ reference: action.reference })
           if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
         } else {
-          const page = await client.listActions({ labels: [`mountaintops request ${String(action.id)}`], limit: 100 })
-          if (!page.actions.length || page.actions.some(x => !['completed', 'failed'].includes(x.status))) throw new Error('Your wallet has no final result yet. Do not retry this payment.')
+          await assertWalletActionFinal(client, action)
         }
         await reload(fresh); setMessage('Wallet payment status checked.')
       })}>{action.state === 'prepared' ? 'Cancel unsent payment' : 'Check wallet result'}</button></div>)}</section>}

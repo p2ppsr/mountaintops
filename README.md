@@ -59,3 +59,11 @@ npm run deploy
 The root uses current CARS CLI. Releases require operator-owned Evans safety gates, isolated canary rendering/drain qualification, continuous probes of custom and generated domains, exact deployed-asset verification, and two Ready serving endpoints on distinct nodes. `ops/canary.Dockerfile` supports a Linux/amd64 remote qualification image of the same frontend source; it adds no application backend. Deployment records, images, routing, release credentials and rollback evidence belong in network-ops.
 
 After publishing addresses, rollback must preserve this wallet record format, expiration blocks and access to all saved key IDs. Do not roll back to the old single-address frontend. Retain the accepted compatible frontend image and use forward repair or a compatible image rollback; never delete wallet recovery outputs or resume expired-address discovery.
+
+## Wallet permission group and branding
+
+`/manifest.json` declares the complete BRC-116 group under `metanet`: identity retrieval, the unchanged Mountaintops derivation/signing protocol, self-only `[2, "mntops v1"]` SDK LocalKVStore encryption/signature checks, both app baskets, all three fixed action-label protocols, and a 100,000-satoshi monthly spending allowance for payments and wallet/network fees. The wallet presents this declaration for user consent; it is not a grant or a hard transfer limit. Above-allowance payments require further wallet approval. No certificate or peer-trust scope is requested. See the [BRC-116 specification](https://github.com/bsv-blockchain/BRCs/blob/master/wallet/0116.md).
+
+New actions use fixed labels and native TXIDs, avoiding a new label permission for every request. Older UUID-labelled actions remain recoverable by reading the common app label and matching their TXID or legacy label in returned metadata. No transaction UI history is persisted.
+
+The header and favicon use the same authored `/mountaintops.svg`. Wallet/PWA icons and the touch icon are PNG renders of that source at 192 and 512 pixels. Keep all variants in sync when changing the logo. The unused legacy Vite file remains only for cached old HTML during compatible releases; the current app and manifest never reference it.
