@@ -4,7 +4,10 @@ import { bookFromRecords, validateAddress } from './addressBook.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { coinIsUnspent, retainedCoins, verifiedEvidence, type Coin } from './coins.ts'
 import Importer from './Importer.ts'
-import type { RecoveryRecord, WalletRecords } from './walletRecords.ts'
+import type { WalletRecords } from './walletRecords.ts'
+import { assertInputsUnspent } from './inputChecks.ts'
+import { unfinishedWalletActions } from './walletActionState.ts'
+export { unfinishedWalletActions } from './walletActionState.ts'
 
 export function parseSatoshis(bsv: string): number {
   if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,8})?$/.test(bsv)) throw new Error('Enter a positive BSV amount with at most 8 decimal places.')
@@ -29,21 +32,6 @@ export function assertSameTemplate(before: Transaction, after: Transaction): voi
 // Native wallet action history is durable before submission and does not need
 // an extra fee-paying record. In particular, an empty wallet can import its first
 // external coins. Signed noSend actions can be aborted by TXID on a fresh device.
-export async function unfinishedWalletActions(wallet: WalletInterface, network: WalletRecords['network']): Promise<RecoveryRecord[]> {
-  const pending: RecoveryRecord[] = []
-  for (let offset = 0; ; offset += 100) {
-    const page = await wallet.listActions({ labels: ['mountaintops actions v1'], includeLabels: true, limit: 100, offset })
-    for (const action of page.actions) {
-      if (!['unsigned', 'nosend', 'nonfinal', 'unprocessed', 'sending', 'unproven'].includes(action.status)) continue
-      const id = action.labels?.find(x => x.startsWith('mountaintops request '))?.slice(21) ?? action.txid
-      const canAbort = action.status === 'nosend' && /^[a-f0-9]{64}$/.test(action.txid)
-      pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
-    }
-    if (offset + page.actions.length >= page.totalActions) break
-    if (page.actions.length !== 100 || offset >= 10000) throw new Error('Wallet action history is incomplete. Check the wallet before another payment.')
-  }
-  return pending
-}
 
 export async function eligibleAction(wallet: WalletInterface, store: WalletRecords, args: CreateActionArgs, coverage: Coverage, progress: Progress, coins: Coin[] = [], recipient?: string): Promise<string> {
   const id = crypto.randomUUID()
@@ -65,6 +53,8 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
       for (const output of args.outputs ?? []) {
         if (tx.outputs.filter(x => x.lockingScript.toHex() === output.lockingScript && BigInt(x.satoshis ?? -1) === BigInt(output.satoshis)).length !== 1) throw new Error('Wallet did not preserve the requested recipient and amount')
       }
+      progress('Checking the wallet’s coins before signing…')
+      await assertInputsUnspent(tx, store.network)
       const spends: SignActionArgs['spends'] = {}
       for (const coin of coins) {
         const indices = tx.inputs.flatMap((input, index) => (input.sourceTXID ?? input.sourceTransaction?.id('hex')) === coin.txid && input.sourceOutputIndex === coin.vout ? [index] : [])
@@ -103,6 +93,9 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         if (store.network === 'mainnet' && !addressMatches(recipient, fresh.stage)) throw new Error('Expired — do not send coins to this address.')
         if (fresh.state?.pending && !addressMatches(recipient, fresh.state.pending.target)) throw new Error('This address expires at the pending transition. Use a longer-coverage destination.')
       }
+      // Permission dialogs and concurrent apps can change the spend state.
+      progress('Checking the wallet’s coins before submission…')
+      await assertInputsUnspent(final, store.network)
       submissionStarted = true
       const result = await wallet.createAction({ description: 'Submit eligible Mountaintops payment', options: { sendWith: [signedTxid], acceptDelayedBroadcast: false, returnTXIDOnly: false } })
       const status = result.sendWithResults?.find(x => x.txid === signedTxid)?.status

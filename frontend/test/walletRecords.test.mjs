@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { before, after } from 'node:test'
 import { PushDrop, Utils } from '@bsv/sdk'
 import { WalletRecords, RECORD_BASKET } from '../src/walletRecords.ts'
 import { FixtureWallet, walletState } from './fixtureWallet.mjs'
+
+const originalFetch = globalThis.fetch
+before(() => { globalThis.fetch = async url => { if (String(url).endsWith('/spent')) return new Response('', { status: 404 }); throw new Error('Unexpected fixture request: ' + url) } })
+after(() => { globalThis.fetch = originalFetch })
 
 test('encrypted PushDrop records restore on a new wallet instance with no browser data', async () => {
   const state = walletState()
@@ -67,4 +71,40 @@ test('combined publication and legacy selections follow the same order and never
   assert.equal(primaryFromRecords(book, [...records, { kind: 'primary', data: { keyID: '1' } }], 0), '1')
   book.find(x => x.keyID === '18').retiredAt = { height: 1000002, lastReceiveHeight: 1000001, hash: 'f'.repeat(64), mtp: 123 }
   assert.equal(primaryFromRecords(book, records, 0), null)
+})
+
+
+for (const afterSigning of [false, true]) test(`recovery record rejects spent wallet inputs ${afterSigning ? 'after signing' : 'before signing'} without publication`, async () => {
+  const { P2PKH, PrivateKey, Transaction, UnlockingScript } = await import('@bsv/sdk')
+  const wallet = new FixtureWallet(), identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const [point] = [...wallet.state.outputs.keys()], [sourceTXID, index] = point.split('.')
+  const conflict = new Transaction(1, [{ sourceTXID, sourceOutputIndex: Number(index), sequence: 0xffffffff, unlockingScript: new UnlockingScript() }], [{ satoshis: 9999990, lockingScript: new P2PKH().lock(new PrivateKey(44).toPublicKey().toAddress()) }])
+  let signed = false, aborts = 0, submissions = 0
+  const create = wallet.createAction.bind(wallet), sign = wallet.signAction.bind(wallet)
+  wallet.createAction = async args => { if (args.options?.sendWith) submissions++; else assert.equal(args.options.noSend, true); return create(args) }
+  wallet.signAction = async args => { signed = true; assert.equal(args.options.noSend, true); return sign(args) }
+  wallet.abortAction = async () => { aborts++; return { aborted: true } }
+  const previous = globalThis.fetch
+  globalThis.fetch = async url => String(url).endsWith('/spent') ? (!afterSigning || signed ? Response.json({ txid: conflict.id('hex'), vin: 0, status: 'confirmed' }) : new Response('', { status: 404 })) : new Response(conflict.toHex())
+  try {
+    await assert.rejects(new WalletRecords(wallet, identity, 'mainnet').append('address', { keyID: '17', address: 'fixture', targetStage: 0 }), /wallet chose coins that have already been spent/)
+    assert.equal(signed, afterSigning); assert.equal(aborts, 1); assert.equal(submissions, 0)
+  } finally { globalThis.fetch = previous }
+})
+
+// A fresh app must see abandoned record preparations without treating an
+// acknowledged broadcast as a second payment or persisting UI history.
+test('native unfinished record actions survive a new app session and block another save', async () => {
+  const { unfinishedWalletActions } = await import('../src/walletActionState.ts')
+  const wallet = new FixtureWallet(), identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const labels = ['mountaintops actions v1', 'mountaintops record v1', 'mountaintops request fixture']
+  let status = 'nosend', creates = 0
+  wallet.listActions = async () => ({ totalActions: 1, actions: [{ txid: 'a'.repeat(64), labels, status }] })
+  wallet.createAction = async () => { creates++; throw new Error('Unexpected action') }
+  const pending = await unfinishedWalletActions(wallet, 'mainnet')
+  assert.equal(pending[0].data.reference, 'a'.repeat(64))
+  await assert.rejects(new WalletRecords(wallet, identity, 'mainnet').append('primary', { keyID: '17' }), /unfinished wallet action/)
+  assert.equal(creates, 0)
+  status = 'unproven'
+  assert.deepEqual(await unfinishedWalletActions(wallet, 'mainnet'), [])
 })

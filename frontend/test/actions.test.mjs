@@ -25,7 +25,7 @@ test('signed outputs and input ordering cannot change after authorization', () =
 })
 test('stage-zero payment uses noSend inspection then one explicit sendWith', async () => {
   const previous = globalThis.fetch
-  globalThis.fetch = async () => Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  globalThis.fetch = async url => String(url).endsWith('/spent') ? new Response('', { status: 404 }) : Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
   const records = []
   const store = { network: 'mainnet', load: async () => records, append: async (kind, data) => { records.push({ kind, data }); return records } }
   const wallet = new FixtureWallet()
@@ -86,4 +86,31 @@ test('fresh-device recovery blocks another payment while a submission is sending
     assert.equal(pending[0].data.state, 'needs wallet review')
     await assert.rejects(sendCoins(wallet, { network: 'mainnet' }, new PrivateKey(43).toPublicKey().toAddress(), '0.00000001', { stage: 0 }, () => {}), /unfinished wallet action/)
   }
+})
+
+
+for (const afterSigning of [false, true]) test(`wallet-added spent inputs stop ${afterSigning ? 'submission after a wallet wait' : 'signing'} and abort the preparation`, async () => {
+  const { UnlockingScript } = await import('@bsv/sdk')
+  const wallet = new FixtureWallet()
+  const [point] = [...wallet.state.outputs.keys()]
+  const [sourceTXID, index] = point.split('.')
+  const conflicting = new Transaction(1, [{ sourceTXID, sourceOutputIndex: Number(index), sequence: 0xffffffff, unlockingScript: new UnlockingScript() }], [{ satoshis: 9999990, lockingScript: new P2PKH().lock(new PrivateKey(44).toPublicKey().toAddress()) }])
+  let signed = false, aborts = 0, submissions = 0
+  const create = wallet.createAction.bind(wallet), sign = wallet.signAction.bind(wallet)
+  wallet.createAction = async args => { if (args.options?.sendWith) submissions++; return create(args) }
+  wallet.signAction = async args => { signed = true; return sign(args) }
+  wallet.abortAction = async () => { aborts++; return { aborted: true } }
+  const previous = globalThis.fetch
+  globalThis.fetch = async url => {
+    if (String(url).endsWith('/spent')) return !afterSigning || signed ? Response.json({ txid: conflicting.id('hex'), vin: 0, status: 'confirmed' }) : new Response('', { status: 404 })
+    if (String(url).endsWith('/hex')) return new Response(conflicting.toHex())
+    return Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  }
+  try {
+    const store = { network: 'mainnet', load: async () => [] }
+    await assert.rejects(sendCoins(wallet, store, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {}), /wallet chose coins that have already been spent/)
+    assert.equal(signed, afterSigning)
+    assert.equal(aborts, 1)
+    assert.equal(submissions, 0)
+  } finally { globalThis.fetch = previous }
 })
