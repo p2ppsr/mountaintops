@@ -34,3 +34,37 @@ test('recovery refuses incomplete pagination and unauthenticated basket entries'
   wallet.listOutputs = async () => ({ totalOutputs: 1, outputs: [{ outpoint: `${'a'.repeat(64)}.0`, tags: ['foreign'] }] })
   await assert.rejects(records.load(), /Ambiguous/)
 })
+
+test('one encrypted publication restores both a new address and its selection', async () => {
+  const { publicDeriver } = await import('../src/derivation.ts')
+  const { bookFromRecords, primaryFromRecords } = await import('../src/addressBook.ts')
+  const state = walletState(), wallet = new FixtureWallet(state)
+  const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const address = publicDeriver(identity)('17', 'mainnet')
+  await new WalletRecords(wallet, identity, 'mainnet').append('address', { keyID: '17', address, targetStage: 0, useForReceiving: true })
+  const restored = await new WalletRecords(new FixtureWallet(state), identity, 'mainnet').load()
+  const book = bookFromRecords(identity, 'mainnet', restored)
+  assert.deepEqual(book.map(x => x.keyID), ['1', '17'])
+  assert.equal(primaryFromRecords(book, restored, 0), '17')
+  assert.equal(restored.length, 1)
+  assert.equal([...state.outputs.values()].filter(x => x.basket === RECORD_BASKET).length, 1)
+  assert.equal(state.actions.length, 1)
+})
+
+test('combined publication and legacy selections follow the same order and never reactivate retirement', async () => {
+  const { publicDeriver } = await import('../src/derivation.ts')
+  const { bookFromRecords, primaryFromRecords } = await import('../src/addressBook.ts')
+  const wallet = new FixtureWallet(), identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const derive = publicDeriver(identity)
+  const records = [
+    { kind: 'address', data: { keyID: '17', address: derive('17', 'mainnet'), targetStage: 0 } },
+    { kind: 'primary', data: { keyID: '17' } },
+    { kind: 'address', data: { keyID: '18', address: derive('18', 'mainnet'), targetStage: 0, useForReceiving: true } }
+  ]
+  const book = bookFromRecords(identity, 'mainnet', records)
+  assert.equal(primaryFromRecords(book, records.slice(0, 2), 0), '17')
+  assert.equal(primaryFromRecords(book, records, 0), '18')
+  assert.equal(primaryFromRecords(book, [...records, { kind: 'primary', data: { keyID: '1' } }], 0), '1')
+  book.find(x => x.keyID === '18').retiredAt = { height: 1000002, lastReceiveHeight: 1000001, hash: 'f'.repeat(64), mtp: 123 }
+  assert.equal(primaryFromRecords(book, records, 0), null)
+})
