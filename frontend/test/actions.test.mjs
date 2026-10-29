@@ -23,25 +23,46 @@ test('signed outputs and input ordering cannot change after authorization', () =
   const after = new Transaction(1, [], [{ ...output, satoshis: 2 }])
   assert.throws(() => assertSameTemplate(before, after), /changed/)
 })
-test('stage-zero payment uses noSend inspection then one explicit sendWith', async () => {
+test('unsigned preparation and withheld signing precede one explicit sendWith', async () => {
   const previous = globalThis.fetch
   globalThis.fetch = async url => String(url).endsWith('/spent') ? new Response('', { status: 404 }) : Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
   const records = []
   const store = { network: 'mainnet', load: async () => records, append: async (kind, data) => { records.push({ kind, data }); return records } }
   const wallet = new FixtureWallet()
   const sent = []
+  const phases = []
   const original = wallet.createAction.bind(wallet)
-  wallet.createAction = async args => { if (args.options?.sendWith) sent.push(...args.options.sendWith); return original(args) }
+  const sign = wallet.signAction.bind(wallet)
+  wallet.createAction = async args => {
+    if (args.options?.sendWith) { phases.push('submit'); sent.push(...args.options.sendWith) }
+    else {
+      phases.push('prepare')
+      assert.equal(args.options?.signAndProcess, false)
+      assert.equal(args.options?.noSend, false)
+    }
+    return original(args)
+  }
+  wallet.signAction = async args => {
+    phases.push('sign')
+    assert.equal(args.options?.noSend, true)
+    const result = await sign(args)
+    assert.equal(wallet.state.actions.at(-1).status, 'nosend')
+    assert.equal(sent.length, 0)
+    return result
+  }
   try {
     const txid = await sendCoins(wallet, store, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {})
     assert.deepEqual(sent, [txid])
+    assert.deepEqual(phases, ['prepare', 'sign', 'submit'])
     assert.equal(wallet.state.actions.at(-1).status, 'unproven')
     assert.equal(records.length, 0)
   } finally { globalThis.fetch = previous }
 })
 
 
-test('first import funds an empty wallet without a prerequisite PushDrop fee', async () => {
+for (const staleMigrationCoin of [false, true]) test(staleMigrationCoin
+  ? 'a self-funded import avoids optional batch migration of an already-spent wallet coin'
+  : 'first import funds an empty wallet without a prerequisite PushDrop fee', async () => {
   const wallet = new FixtureWallet()
   const pub = (await wallet.getPublicKey({ protocolID: [1, 'mountaintops'], keyID: '17', counterparty: 'anyone', forSelf: true })).publicKey
   const { PublicKey, MerklePath } = await import('@bsv/sdk')
@@ -52,9 +73,30 @@ test('first import funds an empty wallet without a prerequisite PushDrop fee', a
   source.merklePath = MerklePath.fromCoinbaseTxidAndHeight(coin.txid, 972000)
   coin.height = 972000
   wallet.state.outputs.set(`${coin.txid}.0`, { basket: 'mountaintops receipts v1', tags: [`address ${address}`], satoshis: 10000, spendable: true, customInstructions: JSON.stringify({ v: 1, network: 'mainnet', ...coin }) })
+  let stale, conflict
+  if (staleMigrationCoin) {
+    const { UnlockingScript } = await import('@bsv/sdk')
+    stale = new Transaction(1, [], [{ satoshis: 17, lockingScript: new P2PKH().lock(wallet.key.toPublicKey().toAddress()) }])
+    conflict = new Transaction(1, [{ sourceTXID: stale.id('hex'), sourceOutputIndex: 0, sequence: 0xffffffff, unlockingScript: new UnlockingScript() }], [{ satoshis: 1, lockingScript: stale.outputs[0].lockingScript }])
+    wallet.state.transactions.set(stale.id('hex'), stale)
+    const point = `${stale.id('hex')}.0`
+    const record = { basket: 'default', tags: [], satoshis: 17, spendable: true }
+    wallet.state.outputs.set(point, record)
+    const create = wallet.createAction.bind(wallet)
+    wallet.createAction = async args => {
+      // Model the reproduced Toolbox 2.14.9 paths: a fully funded ordinary
+      // import uses no funding inputs; batch preparation adds optional dust.
+      if (!args.inputs?.length || args.options?.noSend) return create(args)
+      wallet.state.outputs.delete(point)
+      try { return await create(args) }
+      finally { wallet.state.outputs.set(point, record) }
+    }
+  }
   const store = { network: 'mainnet', load: async () => [], append: async () => { throw new Error('Cannot pay for a record yet') } }
   const previous = globalThis.fetch
   globalThis.fetch = async url => {
+    if (stale && String(url).endsWith(`/tx/${stale.id('hex')}/0/spent`)) return Response.json({ txid: conflict.id('hex'), vin: 0, status: 'confirmed' })
+    if (conflict && String(url).endsWith(`/tx/${conflict.id('hex')}/hex`)) return new Response(conflict.toHex())
     if (String(url).endsWith('/spent')) return new Response('', { status: 404 })
     if (String(url).endsWith('/header')) return Response.json({ merkleroot: coin.txid })
     return Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
@@ -63,6 +105,10 @@ test('first import funds an empty wallet without a prerequisite PushDrop fee', a
     const txid = await importCoins(wallet, store, { keyID: '17', address, network: 'mainnet', targetStage: 0, retiredAt: { height: 1000002, hash: 'f'.repeat(64), mtp: 123, lastReceiveHeight: 1000001 } }, [coin], { stage: 0, state: null }, () => {})
     assert.equal(wallet.state.actions.at(-1).txid, txid)
     assert.ok([...wallet.state.outputs.values()].some(x => x.basket === 'default' && x.satoshis > 0))
+    const imported = wallet.state.transactions.get(txid)
+    assert.equal(imported.inputs.length, 1)
+    assert.equal(imported.inputs[0].sourceTXID, coin.txid)
+    if (stale) assert.equal(wallet.state.outputs.get(`${stale.id('hex')}.0`).spendable, true)
   } finally { globalThis.fetch = previous }
 })
 
