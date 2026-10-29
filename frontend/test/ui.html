@@ -2,7 +2,11 @@
 import { FixtureWallet } from './fixtureWallet.mjs'
 import { firstMatch } from '../src/derivation.ts'
 import { WalletRecords } from '../src/walletRecords.ts'
+import { MerklePath, P2PKH, PublicKey, Transaction } from '@bsv/sdk'
+import { COIN_BASKET } from '../src/coins.ts'
 const wallet = new FixtureWallet()
+const paymentRoots = new Map()
+let savedAddress
 window.CWI = wallet
 const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated fixture · 0 wallet transactions'; document.body.prepend(counter)
 const create = wallet.createAction.bind(wallet)
@@ -10,6 +14,8 @@ let actions = 0
 wallet.createAction = async args => { counter.textContent = `Isolated fixture · ${++actions} wallet transactions`; return create(args) }
 window.fetch = async (input) => {
   const url = String(input)
+  const headerHeight = Number(url.match(/\/block\/(\d+)\/header$/)?.[1])
+  if (paymentRoots.has(headerHeight)) return Response.json({ merkleroot: paymentRoots.get(headerHeight) })
   if (url.endsWith('/spent')) return new Response('', { status: 404 })
   if (url.includes('/block/height/972777')) return Response.json({ height: 972777, hash: 'a'.repeat(64), previousblockhash: 'b'.repeat(64), mediantime: Date.parse('2026-10-29T12:00:00Z') / 1000 })
   if (url.includes('/chain/info')) return Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
@@ -20,12 +26,25 @@ if (new URL(location.href).searchParams.has('saved')) {
   const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
   const found = firstMatch(identity, 8, 'mainnet', 10000n)
   if (!found) throw new Error('Fixture address missing')
+  savedAddress = found
   await new WalletRecords(wallet, identity, 'mainnet').append('address', { keyID: found.keyID, address: found.address, targetStage: 8, useForReceiving: true })
 }
 if (new URL(location.href).searchParams.has('expired')) {
   const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
   const store = new WalletRecords(wallet, identity, 'mainnet')
   await store.append('retirement', { keyID: '1', boundary: { height: 1000002, hash: 'f'.repeat(64), mtp: 1920000000, lastReceiveHeight: 1000001 } })
+}
+if (new URL(location.href).searchParams.has('payments')) {
+  for (const [index, keyID] of ['1', savedAddress?.keyID].filter(Boolean).entries()) {
+    const pub = await wallet.getPublicKey({ protocolID: [1, 'mountaintops'], keyID, counterparty: 'anyone', forSelf: true })
+    const address = PublicKey.fromString(pub.publicKey).toAddress()
+    const tx = new Transaction(1, [], [{ satoshis: index ? 10000 : 10002, lockingScript: new P2PKH().lock(address) }])
+    const txid = tx.id('hex'), height = 971998 + index
+    tx.merklePath = MerklePath.fromCoinbaseTxidAndHeight(txid, height)
+    paymentRoots.set(height, txid); wallet.state.transactions.set(txid, tx)
+    const coin = { txid, vout: 0, satoshis: index ? 10000 : 10002, keyID, address, height }
+    wallet.state.outputs.set(`${txid}.0`, { basket: COIN_BASKET, tags: [], satoshis: coin.satoshis, spendable: true, customInstructions: JSON.stringify({ v: 1, network: 'mainnet', ...coin }) })
+  }
 }
 await import('../src/main.tsx')
 </script></body></html>

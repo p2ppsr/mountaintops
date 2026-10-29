@@ -6,7 +6,7 @@ import { applyExpirations, bookFromRecords } from './addressBook.ts'
 import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveUX.ts'
 import ReceiveInfo from './ReceiveInfo.tsx'
 import { readCoverage, type Coverage } from './coverageClient.ts'
-import { refreshCoins, type Coin } from './coins.ts'
+import { availableRetainedCoins, refreshCoins, type Coin } from './coins.ts'
 import { importCoins, sendCoins, unfinishedWalletActions } from './actions.ts'
 import { preferCompatibleTransport } from './walletClient.ts'
 import { assertWalletActionFinal } from './walletActionState.ts'
@@ -28,6 +28,7 @@ export default function Mountaintops() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [balances, setBalances] = useState<Record<string, Coin[] | undefined>>({})
+  const [checkedPayments, setCheckedPayments] = useState<Record<string, boolean>>({})
   const [view, setView] = useState<'receive' | 'send'>('receive')
   const [target, setTarget] = useState('auto')
   const [candidate, setCandidate] = useState<{ stage: number; keyID: string; address: string } | null>(null)
@@ -49,7 +50,7 @@ export default function Mountaintops() {
     if (operation.current) return
     operation.current = true; setBusy(true)
     if (!quiet) { setError(''); setMessage('Working… Check your wallet if prompted.') }
-    try { await task() } catch (e) { setError(e instanceof Error ? e.message : 'Operation unavailable. Check your wallet before retrying a payment.') }
+    try { await task() } catch (e) { setMessage(''); setError(e instanceof Error ? e.message : 'Operation unavailable. Check your wallet before retrying a payment.') }
     finally { operation.current = false; setBusy(false) }
   }
 
@@ -58,7 +59,7 @@ export default function Mountaintops() {
     const { network } = await client.getNetwork({})
     const { publicKey: identity } = await client.getPublicKey({ identityKey: true })
     if (previous && (previous.identity !== identity || previous.network !== network)) {
-      setSession(null); setBalances({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
+      setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
       throw new Error('Wallet account or network changed. Connect again to load its own records.')
     }
     const store = previous?.store ?? new WalletRecords(client, identity, network)
@@ -77,6 +78,22 @@ export default function Mountaintops() {
     setSession(next)
     return next
   }
+
+  const connect = () => void run(async () => {
+    setBalances({}); setCheckedPayments({})
+    const fresh = await reload(null)
+    setMessage('Restoring payments from your wallet…')
+    let failure: unknown
+    for (const entry of fresh.book) {
+      try {
+        const coins = await availableRetainedCoins(client, entry, fresh.coverage)
+        setBalances(x => ({ ...x, [entry.keyID]: coins }))
+      } catch (e) { failure ??= e }
+    }
+    await reload(fresh)
+    if (failure) throw failure
+    setMessage('')
+  })
 
   // Only chain coverage is rechecked. No background address-deposit polling.
   useEffect(() => {
@@ -156,15 +173,18 @@ export default function Mountaintops() {
   }
   const checkCoins = (keyID: string) => void run(async () => {
     const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)!
+    setCheckedPayments(x => ({ ...x, [keyID]: false }))
     const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
-    setBalances(x => ({ ...x, [keyID]: coins })); await reload(fresh)
-    setMessage('Payments checked.')
+    setBalances(x => ({ ...x, [keyID]: coins })); setCheckedPayments(x => ({ ...x, [keyID]: true })); await reload(fresh)
+    setMessage('Payments checked for this address.')
   })
   const checkAllCoins = () => void run(async () => {
     const fresh = await reload()
     for (const entry of fresh.book) {
+      setCheckedPayments(x => ({ ...x, [entry.keyID]: false }))
       const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
       setBalances(x => ({ ...x, [entry.keyID]: coins }))
+      setCheckedPayments(x => ({ ...x, [entry.keyID]: true }))
     }
     await reload(fresh); setMessage('Payments checked.')
   })
@@ -174,6 +194,7 @@ export default function Mountaintops() {
     const entry = fresh.book.find(x => x.keyID === keyID)!
     const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
     const submitted = await importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage)
+    setCheckedPayments(x => ({ ...x, [keyID]: false }))
     setTxid(submitted); setHistory(x => [{ txid: submitted, description: 'Import to wallet', status: 'Submitted' }, ...x]); setBalances(x => ({ ...x, [keyID]: undefined }))
     await reload(fresh); setMessage('Transfer submitted. Check your wallet for the final result.')
   })
@@ -194,6 +215,8 @@ export default function Mountaintops() {
   const primary = session?.book.find(x => x.keyID === session.primary)
   const suggestedEntry = !candidate && !pausedSearch && !searching && session?.book.filter(x => !x.retiredAt && lastCoveredStage(x.address) > (primary ? lastCoveredStage(primary.address) : -1)).sort((a, b) => lastCoveredStage(b.address) - lastCoveredStage(a.address))[0]
   const pendingActions = session ? unresolvedActions(session.records) : []
+  const allPaymentsChecked = Boolean(session?.book.every(x => checkedPayments[x.keyID]))
+  const checkedCount = session?.book.filter(x => checkedPayments[x.keyID]).length ?? 0
   const savedSearches = session ? [...new Map(session.records.filter(x => x.kind === 'search').map(x => [Number(x.data.stage), x.data])).values()]
     .filter(x => Number(x.stage) > Math.max(...session.book.map(entry => lastCoveredStage(entry.address)))) : []
   const card = (entry: AddressRecord, selected = false) => {
@@ -217,7 +240,7 @@ export default function Mountaintops() {
         {!entry.retiredAt && <button className={selected ? 'accent' : 'secondary'} disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => void run(async () => { const fresh = await reload(); if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked); assertReceivable(fresh.book.find(x => x.keyID === entry.keyID)!, fresh.coverage.stage); await navigator.clipboard.writeText(entry.address); setMessage('Address copied. Share its expiration information too.'); })}>Copy address</button>}
         {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use for receiving</button>}
       </div>
-      {!selected && <><div className="funds-row"><div>{total !== undefined ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">Payments</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
+      {!selected && <><div className="funds-row"><div>{total !== undefined && (total > 0 || checkedPayments[entry.keyID]) ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">{total === undefined ? 'Payments not checked' : 'Not checked for new payments'}</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
       {Boolean(coins?.length) && <div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>}</>}
       <details className="technical"><summary>Address details</summary><p>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>{entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}. New-deposit lookups have stopped permanently.</p>}<p>Key ID {entry.keyID} · address rules satisfied through stage {level}. Payment transaction rules also apply.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside coverage, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership.</p>}</details>
     </article>
@@ -225,7 +248,7 @@ export default function Mountaintops() {
 
   return <main aria-busy={busy || searching}>
     <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
-    {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={() => void run(async () => { await reload(null); setMessage(''); })}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
+    {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={connect}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
       <nav className="view-tabs" aria-label="Payment direction"><button aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
       {pendingActions.length > 0 && <section className="warning"><h2>Check your wallet before continuing</h2><p>A previous payment has no final result yet. Do not send it again.</p>{pendingActions.map(action => <div key={String(action.id)}><details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
         const fresh = await reload()
@@ -242,11 +265,11 @@ export default function Mountaintops() {
       {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
       {view === 'receive' ? <section className="receive-panel" aria-label="Receive BSV">
         {primary ? card(primary, true) : <div className="empty-state"><h2>Choose a receiving address</h2><p>Find a new address or choose an active one below. Earlier payments remain yours.</p></div>}
-        <div className="payments-panel"><div className="section-heading"><h3>Payments to your addresses</h3><button className="secondary" disabled={disabled} onClick={checkAllCoins}>Check payments</button></div>
-          {session.book.every(x => balances[x.keyID] !== undefined) ? <p className="small">All addresses checked this session.</p> : <p className="small">Check here for payments to current and earlier addresses.</p>}
+        <div className="payments-panel"><div className="section-heading"><h3>Payments to your addresses</h3><button className="secondary" disabled={disabled} onClick={checkAllCoins}>Refresh payments</button></div>
+          <p className="small">{allPaymentsChecked ? 'All addresses checked this session.' : checkedCount ? `${checkedCount} of ${session.book.length} addresses checked for new payments.` : session.book.every(x => balances[x.keyID] !== undefined) ? 'Payments restored from your wallet. Refresh to check for new ones.' : 'Some payments still need checking. Refresh to check all addresses.'}</p>
           {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong><span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span></div><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button></div>)}
           {session.book.some(x => balances[x.keyID]?.length) && <p className="small">Wallet fees apply when moving coins.</p>}
-          {session.book.every(x => balances[x.keyID] !== undefined && balances[x.keyID]?.length === 0) && <p className="small">No available payments found.</p>}
+          {allPaymentsChecked && session.book.every(x => balances[x.keyID]?.length === 0) && <p className="small">No available payments found.</p>}
         </div>
         <div className="mining"><div className="section-heading"><div><h3>A longer-lasting address</h3><p className="small">{suggestedEntry ? 'Already saved. Free to switch.' : 'Free to find. Wallet fees apply to save it.'}</p></div>{searching ? <button className="secondary" onClick={cancelMine}>Pause</button> : <button disabled={disabled || session.network !== 'mainnet'} onClick={() => suggestedEntry ? choose(suggestedEntry.keyID) : void mine()}>{suggestedEntry ? 'Use saved address' : pausedSearch ? 'Keep searching' : 'Find an address'}</button>}</div>
           {suggestedEntry && <div className="saved-preview"><p className="coverage">{expirationEstimate(lastCoveredStage(suggestedEntry.address), calendar)}</p><span className="small">Estimated · stage {lastCoveredStage(suggestedEntry.address)}</span></div>}
