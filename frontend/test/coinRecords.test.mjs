@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MerklePath, P2PKH, PublicKey, Transaction } from '@bsv/sdk'
-import { COIN_BASKET, refreshCoins, retainedCoins } from '../src/coins.ts'
+import { availableRetainedCoins, COIN_BASKET, refreshCoins, retainedCoins } from '../src/coins.ts'
 import { FixtureWallet } from './fixtureWallet.mjs'
 
 test('tagless wallet receipts remain recoverable and are scoped to each address', async () => {
@@ -28,7 +28,10 @@ test('tagless wallet receipts remain recoverable and are scoped to each address'
   await assert.rejects(retainedCoins(wallet, entries[0]), /pagination is incomplete/)
 })
 
-test('active refresh reuses acknowledged evidence and still checks actual spend status and canonical roots', async () => {
+for (const mode of ['discovery', 'restore-active', 'restore-expired', 'restore-unknown']) test(mode === 'discovery'
+  ? 'active refresh reuses acknowledged evidence and checks spend status and canonical roots'
+  : mode === 'restore-unknown' ? 'unknown spend state during reconnect is an error, never a zero balance'
+  : `${mode} recovers wallet funds on a fresh instance without address lookups or paid records`, async () => {
   const wallet = new FixtureWallet()
   const keyID = '1'
   const pub = await wallet.getPublicKey({ protocolID: [1, 'mountaintops'], keyID, counterparty: 'anyone', forSelf: true })
@@ -40,17 +43,29 @@ test('active refresh reuses acknowledged evidence and still checks actual spend 
   const coin = { txid, vout: 0, satoshis: 10000, keyID, address, height }
   wallet.state.outputs.set(`${txid}.0`, { basket: COIN_BASKET, tags: [], satoshis: 10000, spendable: true, customInstructions: JSON.stringify({ v: 1, network: 'mainnet', ...coin }) })
   wallet.internalizeAction = async () => { throw new Error('Must not reinsert acknowledged evidence') }
+  wallet.createAction = async () => { throw new Error('Recovery must not create a transaction') }
   const previous = globalThis.fetch, calls = []
   globalThis.fetch = async url => {
     calls.push(String(url))
-    if (String(url).includes('/unspent/all')) return Response.json({ address, result: [{ tx_hash: txid, tx_pos: 0, value: 10000, height, isSpentInMempoolTx: false }] })
-    if (String(url).endsWith('/spent')) return new Response('', { status: 404 })
+    if (mode === 'discovery' && String(url).includes('/unspent/all')) return Response.json({ address, result: [{ tx_hash: txid, tx_pos: 0, value: 10000, height, isSpentInMempoolTx: false }] })
+    if (String(url).endsWith('/spent')) return new Response('', { status: mode === 'restore-unknown' ? 400 : 404 })
     if (String(url).endsWith(`/block/${height}/header`)) return Response.json({ merkleroot: txid })
     throw new Error('Unexpected proof download: ' + url)
   }
   try {
-    const coins = await refreshCoins(wallet, {}, { keyID, address, network: 'mainnet', targetStage: 0, retiredAt: null }, { stage: 0, height: 972777, activations: [] }, () => {})
+    const entry = { keyID, address, network: 'mainnet', targetStage: 0, retiredAt: mode === 'restore-expired' ? { height: 1000002, hash: 'f'.repeat(64), mtp: 123, lastReceiveHeight: 1000001 } : null }
+    const coverage = { stage: 0, height: 972777, activations: [] }
+    const fresh = new FixtureWallet(wallet.state)
+    fresh.createAction = wallet.createAction; fresh.internalizeAction = wallet.internalizeAction
+    if (mode === 'restore-unknown') {
+      await assert.rejects(availableRetainedCoins(fresh, entry, coverage), /Spend status unknown/)
+      assert.equal(calls.length, 1)
+      return
+    }
+    const coins = mode === 'discovery' ? await refreshCoins(fresh, {}, entry, coverage, () => {}) : await availableRetainedCoins(fresh, entry, coverage)
     assert.equal(coins.length, 1)
-    assert.equal(calls.length, 3)
+    assert.equal(coins[0].satoshis, 10000)
+    assert.equal(calls.length, mode === 'discovery' ? 3 : 2)
+    if (mode !== 'discovery') assert.equal(calls.some(url => url.includes('/address/')), false)
   } finally { globalThis.fetch = previous }
 })

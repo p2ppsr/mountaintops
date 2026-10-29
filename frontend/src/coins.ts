@@ -217,6 +217,14 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
       catch { progress('Coin evidence is retained in your wallet. Saving historical-check completion needs wallet funds; the bounded check may repeat until it is saved. Import remains available.') }
     }
   }
+  return availableRetainedCoins(wallet, entry, coverage, retained)
+}
+
+// Reconnecting restores known funds from the wallet without address discovery,
+// historical bootstrap receipts, or a fee-bearing record. Keep the same source,
+// spend-state and canonical-proof checks used by an explicit payment refresh.
+export async function availableRetainedCoins(wallet: WalletInterface, entry: AddressRecord, coverage: Coverage, retained?: Awaited<ReturnType<typeof retainedCoins>>): Promise<Coin[]> {
+  retained ??= await retainedCoins(wallet, entry)
   const unique = new Map<string, Coin>()
   for (const coin of retained.coins) {
     // Revalidate known evidence even for wallet rows omitted from current WoC
