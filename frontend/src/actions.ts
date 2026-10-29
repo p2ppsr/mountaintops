@@ -44,7 +44,11 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
     let nonce = 0
     while (performance.now() - started < 30_000) {
       progress(`Preparing an eligible transaction (attempt ${nonce + 1}). Your wallet may request permission; payment fees apply to the submitted payment.`)
-      const prepared = await wallet.createAction({ ...args, version: 1, lockTime: nonce++, labels: [...(args.labels ?? []), ACTION_LABEL], options: { signAndProcess: false, noSend: true, returnTXIDOnly: false, randomizeOutputs: false } })
+      // A two-step action is unsigned until signAction. Request ordinary
+      // preparation here: noSend preparation can trigger wallet batch funding
+      // that adds migration inputs even when an import already covers its fees.
+      // Broadcast remains withheld by signAction's explicit noSend below.
+      const prepared = await wallet.createAction({ ...args, version: 1, lockTime: nonce++, labels: [...(args.labels ?? []), ACTION_LABEL], options: { signAndProcess: false, noSend: false, returnTXIDOnly: false, randomizeOutputs: false } })
       if (!prepared.signableTransaction) throw new Error('The wallet did not return a signable transaction; no automatic retry is safe.')
       reference = prepared.signableTransaction.reference
       const tx = Transaction.fromAtomicBEEF(prepared.signableTransaction.tx)
