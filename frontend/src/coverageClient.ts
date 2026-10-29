@@ -3,7 +3,7 @@ import { whatsOnChainFetch } from './whatsOnChainClient.ts'
 import type { WalletRecords, RecoveryRecord } from './walletRecords.ts'
 
 export type Activation = { stage: number; height: number; hash: string; mtp: number }
-export type Coverage = { network: Network; height: number; hash: string; stage: number; anchorMtp: number | null; state: ChainState | null; activations: Activation[]; checkedAt: number; persistenceWarning?: string }
+export type Coverage = { network: Network; height: number; hash: string; stage: number; anchorMtp: number | null; tipMtp?: number; state: ChainState | null; activations: Activation[]; checkedAt: number; persistenceWarning?: string }
 export type BlockInfo = { height: number; hash: string; previousblockhash: string; mediantime: number; txcount?: number; num_tx?: number }
 const hex64 = /^[a-f0-9]{64}$/
 export function apiBase(network: Network): string { return `https://api.whatsonchain.com/v1/bsv/${network === 'mainnet' ? 'main' : 'test'}` }
@@ -31,7 +31,18 @@ function validateBlock(block: BlockInfo, height: number): BlockInfo {
 export async function readCoverage(network: Network, records: RecoveryRecord[], store: WalletRecords, progress: (message: string) => void = () => {}): Promise<Coverage> {
   const tip = await wocJson<{ blocks: number; bestblockhash: string }>(network, '/chain/info')
   if (!Number.isSafeInteger(tip.blocks) || tip.blocks < 0 || !hex64.test(tip.bestblockhash)) throw new Error('Invalid chain tip')
-  if (network !== 'mainnet' || tip.blocks < ANCHOR_HEIGHT) return { network, height: tip.blocks, hash: tip.bestblockhash, stage: 0, anchorMtp: null, state: null, activations: [], checkedAt: Date.now() }
+  if (network !== 'mainnet' || tip.blocks < ANCHOR_HEIGHT) {
+    let tipMtp: number | undefined
+    if (network === 'mainnet') {
+      // Calendar estimates are optional display data. A failed estimate lookup
+      // must not invent a date or change the pre-anchor coverage rules.
+      try {
+        const block = validateBlock(await wocJson<BlockInfo>(network, `/block/height/${tip.blocks}`), tip.blocks)
+        if (block.hash === tip.bestblockhash) tipMtp = block.mediantime
+      } catch { /* Receiving remains stage 0; show the estimate as unavailable. */ }
+    }
+    return { network, height: tip.blocks, hash: tip.bestblockhash, stage: 0, anchorMtp: null, tipMtp, state: null, activations: [], checkedAt: Date.now() }
+  }
 
   let state: ChainState | null = null
   let activations: Activation[] = []

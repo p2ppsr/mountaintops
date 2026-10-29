@@ -1,13 +1,26 @@
 <!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Mountaintops isolated UI fixture</title></head><body><div id="root"></div><script type="module">
 import { FixtureWallet } from './fixtureWallet.mjs'
+import { firstMatch } from '../src/derivation.ts'
 import { WalletRecords } from '../src/walletRecords.ts'
 const wallet = new FixtureWallet()
 window.CWI = wallet
+const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated fixture · 0 wallet transactions'; document.body.prepend(counter)
+const create = wallet.createAction.bind(wallet)
+let actions = 0
+wallet.createAction = async args => { counter.textContent = `Isolated fixture · ${++actions} wallet transactions`; return create(args) }
 window.fetch = async (input) => {
   const url = String(input)
+  if (url.endsWith('/spent')) return new Response('', { status: 404 })
+  if (url.includes('/block/height/972777')) return Response.json({ height: 972777, hash: 'a'.repeat(64), previousblockhash: 'b'.repeat(64), mediantime: Date.parse('2026-10-29T12:00:00Z') / 1000 })
   if (url.includes('/chain/info')) return Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
   if (url.includes('/unspent/all') || url.includes('/confirmed/history')) return Response.json({ address: url.split('/address/')[1].split('/')[0], result: [], error: '' })
   throw new Error('Unexpected fixture network request: ' + url)
+}
+if (new URL(location.href).searchParams.has('saved')) {
+  const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey
+  const found = firstMatch(identity, 8, 'mainnet', 10000n)
+  if (!found) throw new Error('Fixture address missing')
+  await new WalletRecords(wallet, identity, 'mainnet').append('address', { keyID: found.keyID, address: found.address, targetStage: 8, useForReceiving: true })
 }
 if (new URL(location.href).searchParams.has('expired')) {
   const identity = (await wallet.getPublicKey({ identityKey: true })).publicKey

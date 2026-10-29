@@ -64,7 +64,7 @@ export class FixtureWallet extends ProtoWallet {
       const original = args.outputs?.[index]
       this.state.outputs.set(`${txid}.${index}`, { basket: original?.basket ?? 'default', tags: original?.tags ?? [], satoshis: out.satoshis, customInstructions: original?.customInstructions, spendable: true })
     })
-    this.state.actions.push({ txid, status: options?.noSend ? 'nosend' : 'unproven', labels: args.labels ?? [], description: args.description })
+    this.state.actions.push({ txid, satoshis: -2, isOutgoing: true, version: tx.version, lockTime: tx.lockTime, status: options?.noSend ? 'nosend' : 'unproven', labels: args.labels ?? [], description: args.description })
     return { txid, tx: tx.toAtomicBEEF() }
   }
   async abortAction() { return { aborted: true } }
