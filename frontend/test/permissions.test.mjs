@@ -127,7 +127,7 @@ test('legacy and new pending actions resolve using one fixed label across pages'
   await assertWalletActionFinal(wallet, { id: 'old-request' })
   await assertWalletActionFinal(wallet, { txid: actions[100].txid })
   actions[100].status = 'unproven'
-  await assert.rejects(assertWalletActionFinal(wallet, { id: 'old-request' }), /no final result/)
-  await assert.rejects(assertWalletActionFinal(wallet, { txid: 'f'.repeat(64) }), /no final result/)
+  await assert.rejects(assertWalletActionFinal(wallet, { id: 'old-request' }), /Submitted; waiting for confirmation/)
+  await assert.rejects(assertWalletActionFinal(wallet, { txid: 'f'.repeat(64) }), /outcome is not known/)
   await assert.rejects(unfinishedWalletActions({ listActions: async () => ({ totalActions: 200, actions: [] }) }, 'mainnet'), /incomplete/)
 })

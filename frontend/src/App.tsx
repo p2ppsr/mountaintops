@@ -9,7 +9,7 @@ import { readCoverage, type Coverage } from './coverageClient.ts'
 import { availableRetainedCoins, refreshCoins, type Coin } from './coins.ts'
 import { importCoins, sendCoins, unfinishedWalletActions } from './actions.ts'
 import { preferCompatibleTransport } from './walletClient.ts'
-import { assertWalletActionFinal } from './walletActionState.ts'
+import { walletActionStatus, walletStatusMessage } from './walletActionState.ts'
 import './style.css'
 
 const client = new WalletClient('auto')
@@ -27,6 +27,7 @@ export default function Mountaintops() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [statusCheckedAt, setStatusCheckedAt] = useState<number | null>(null)
   const [balances, setBalances] = useState<Record<string, Coin[] | undefined>>({})
   const [checkedPayments, setCheckedPayments] = useState<Record<string, boolean>>({})
   const [view, setView] = useState<'receive' | 'send'>('receive')
@@ -76,6 +77,7 @@ export default function Mountaintops() {
     records = [...records, ...await unfinishedWalletActions(client, network)]
     const next = { identity, network, store, records, book, coverage, primary: receivingBlocked ? null : receivingKeyID(book, coverage.stage, previous?.primary), receivingBlocked }
     setSession(next)
+    setStatusCheckedAt(Date.now())
     return next
   }
 
@@ -250,16 +252,19 @@ export default function Mountaintops() {
     <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
     {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={connect}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
       <nav className="view-tabs" aria-label="Payment direction"><button aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
-      {pendingActions.length > 0 && <section className="warning"><h2>Check your wallet before continuing</h2><p>A previous payment has no final result yet. Do not send it again.</p>{pendingActions.map(action => <div key={String(action.id)}><details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
+      {pendingActions.length > 0 && <section className="warning" aria-label="Wallet payment status"><h2>{pendingActions.every(action => action.state === 'awaiting confirmation') ? 'Submitted; waiting for confirmation' : 'Check your wallet before continuing'}</h2><p>Do not send these payments again. Confirmation may take time after submission.</p>{statusCheckedAt && <p className="small">Last checked {new Date(statusCheckedAt).toLocaleTimeString()}.</p>}{pendingActions.map(action => <div key={String(action.id)}>
+        <p>{action.state === 'awaiting confirmation' ? walletStatusMessage('unproven') : action.state === 'prepared' ? 'This payment is prepared but has not been submitted.' : walletStatusMessage('unknown')}</p>
+        <details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
         const fresh = await reload()
         if (action.state === 'prepared' && typeof action.reference === 'string') {
           const aborted = await client.abortAction({ reference: action.reference })
           if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
+          await reload(fresh); setMessage('Unsent payment canceled.')
         } else {
-          await assertWalletActionFinal(client, action)
+          const status = await walletActionStatus(client, action)
+          await reload(fresh); setMessage(status === 'unproven' ? 'Payment status refreshed. Still waiting for confirmation.' : walletStatusMessage(status))
         }
-        await reload(fresh); setMessage('Wallet payment status checked.')
-      })}>{action.state === 'prepared' ? 'Cancel unsent payment' : 'Check wallet result'}</button></div>)}</section>}
+      })}>{action.state === 'prepared' ? 'Cancel unsent payment' : 'Refresh payment status'}</button></div>)}</section>}
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
       {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
       {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}

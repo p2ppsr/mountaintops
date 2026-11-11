@@ -46,5 +46,11 @@ if (new URL(location.href).searchParams.has('payments')) {
     wallet.state.outputs.set(`${txid}.0`, { basket: COIN_BASKET, tags: [], satoshis: coin.satoshis, spendable: true, customInstructions: JSON.stringify({ v: 1, network: 'mainnet', ...coin }) })
   }
 }
+const pendingStatus = new URL(location.href).searchParams.get('pending')
+if (pendingStatus) {
+  const pending = { txid: 'a'.repeat(64), status: pendingStatus, satoshis: 0, isOutgoing: true, version: 1, lockTime: 0, labels: ['mountaintops actions v1'], description: 'Synthetic payment waiting for wallet status' }
+  wallet.state.actions.push(pending)
+  window.fixtureSetStatus = status => { pending.status = status }
+}
 await import('../src/main.tsx')
 </script></body></html>

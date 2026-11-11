@@ -67,3 +67,23 @@ After publishing addresses, rollback must preserve this wallet record format, ex
 New actions use fixed labels and native TXIDs, avoiding a new label permission for every request. Older UUID-labelled actions remain recoverable by reading the common app label and matching their TXID or legacy label in returned metadata. No transaction UI history is persisted.
 
 The header and favicon use the same authored `/mountaintops.svg`. Wallet/PWA icons and the touch icon are PNG renders of that source at 192 and 512 pixels. Keep all variants in sync when changing the logo. The unused legacy Vite file remains only for cached old HTML during compatible releases; the current app and manifest never reference it.
+
+## November 11 payment-status candidate
+
+The local review candidate distinguishes a submitted `unproven` payment waiting
+for a mined proof from an unknown sending outcome. **Refresh payment status**
+reads wallet history and shows the last check time without signing, rebroadcasting
+or saving a record. Prepared unsent actions retain their separate cancel action.
+All existing pending-payment guards, fixed labels, device-independent recovery,
+receiving expiration and coin/input checks remain. No schema migration or live
+release is included; operator merge and release review remain pending.
+
+Validation from `frontend/`: `npm test`, `npm run lint`, `npm run build`, and
+`npm run test:browser`. Browser checks at 1440, 390 and 320 pixels cover delayed
+proof, repeated refresh, blocked resend, completion, reconnect and unknown
+outcomes using synthetic wallet state. They assert zero wallet transactions and
+block external requests. `PAYMENT_STATUS_EVIDENCE` optionally saves synthetic
+screenshots. The status API supplies no submission timestamp, so the UI reports
+the observed check time rather than inventing elapsed submission time. Release
+must retain the immutable asset bridge and existing CARS availability rules;
+rollback is the prior compatible frontend, never deletion of wallet records.
