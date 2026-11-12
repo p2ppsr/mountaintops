@@ -29,7 +29,7 @@ try {
       assert.equal(await status.getAttribute('class'), 'payment-status sent')
       await page.getByText('Received', { exact: true }).waitFor()
       await page.getByText('10,002 sats', { exact: true }).waitFor()
-      await page.getByText('New transfers are paused until your outgoing payment confirms.', { exact: true }).waitFor()
+      await page.getByText('Transfers resume after confirmation.', { exact: true }).waitFor()
       await status.getByText('Payment details', { exact: true }).click()
       await status.getByText('Last checked', { exact: false }).waitFor()
       await status.getByText('Payment details', { exact: true }).click()
