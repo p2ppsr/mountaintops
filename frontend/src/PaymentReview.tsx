@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { bsvAmount } from './paymentAmount.ts'
 import PaymentProgress from './PaymentProgress.tsx'
+import { ActionButton } from './ActionFeedback.tsx'
 
 export type PaymentDraft = { recipient: string; satoshis: number }
 
@@ -13,6 +14,6 @@ export default function PaymentReview({ payment, busy, sending, phase, onBack, o
     <p className="small">{bsvAmount(payment.satoshis)} BSV</p>
     <div className="review-recipient"><span className="small">To</span><code>{payment.recipient}</code></div>
     <p className="small review-fees">Wallet and network fees are additional.</p>
-    <div className="review-actions"><button className="secondary" disabled={busy} onClick={onBack}>Back</button><button className="accent" disabled={busy} onClick={onSend}>{sending ? 'Sending…' : 'Send payment'}</button></div>
+    <div className="review-actions"><button className="secondary" disabled={busy} onClick={onBack}>Back</button><ActionButton variant="accent" active={sending} disabled={busy} label="Send payment" activeLabel="Sending…" onClick={onSend} /></div>
   </section>
 }

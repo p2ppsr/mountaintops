@@ -1,3 +1,4 @@
+import { ActionButton } from './ActionFeedback.tsx'
 export type RefreshState = { kind: 'payments' | 'single' | 'addresses'; keyID?: string; detail: string }
 
 export function RefreshIcon({ spinning = false }: { spinning?: boolean }) {
@@ -5,7 +6,7 @@ export function RefreshIcon({ spinning = false }: { spinning?: boolean }) {
 }
 
 export function RefreshButton({ active, disabled, label, ariaLabel, onClick }: { active: boolean; disabled: boolean; label: string; ariaLabel?: string; onClick: () => void }) {
-  return <button className="secondary refresh-button" aria-label={ariaLabel ?? label} aria-busy={active} disabled={disabled} onClick={onClick}>{active && <RefreshIcon spinning />}{active ? 'Refreshing…' : label}</button>
+  return <ActionButton active={active} disabled={disabled} label={label} activeLabel="Refreshing…" ariaLabel={ariaLabel ?? label} icon={<RefreshIcon spinning />} onClick={onClick} />
 }
 
 export default function RefreshProgress({ progress }: { progress: RefreshState }) {

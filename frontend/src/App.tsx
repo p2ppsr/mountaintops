@@ -9,6 +9,7 @@ import PaymentStatus from './PaymentStatus.tsx'
 import PaymentReceipt, { type PaymentReceiptData } from './PaymentReceipt.tsx'
 import PaymentProgress from './PaymentProgress.tsx'
 import RefreshProgress, { RefreshButton, type RefreshState } from './RefreshProgress.tsx'
+import ActionFeedback, { ActionButton, type Activity } from './ActionFeedback.tsx'
 import PaymentReview, { type PaymentDraft } from './PaymentReview.tsx'
 import { bsvAmount, parseAmount, type AmountUnit } from './paymentAmount.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
@@ -47,6 +48,9 @@ export default function Mountaintops() {
   const [receipt, setReceipt] = useState<PaymentReceiptData | null>(null)
   const [paymentInFlight, setPaymentInFlight] = useState<'send' | 'move' | null>(null)
   const [refreshing, setRefreshing] = useState<RefreshState | null>(null)
+  const [activity, setActivity] = useState<Activity | null>(null)
+  const [movingKeyID, setMovingKeyID] = useState<string | null>(null)
+  const [copyingAddress, setCopyingAddress] = useState<string | null>(null)
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
   const [manualCopyAddress, setManualCopyAddress] = useState<string | null>(null)
   const [history, setHistory] = useState<PaymentReceiptData[]>([])
@@ -55,6 +59,7 @@ export default function Mountaintops() {
   const worker = useRef<Worker | null>(null)
   const searchProgress = useRef<{ stage: number; next: string } | null>(null)
   const operation = useRef(false)
+  const copying = useRef(false)
   const current = useRef<Session | null>(null)
   current.current = session
 
@@ -64,16 +69,16 @@ export default function Mountaintops() {
     const timer = setTimeout(() => setCopiedAddress(null), 2000)
     return () => clearTimeout(timer)
   }, [copiedAddress])
-  const run = async (task: () => Promise<void>, quiet = false) => {
+  const run = async (task: () => Promise<void>, quiet = false, feedback: Activity | null = null) => {
     if (operation.current) return
-    operation.current = true; setBusy(true)
+    operation.current = true; setBusy(true); setActivity(feedback)
     if (!quiet) { setError(''); setMessage('Working… Check your wallet if prompted.') }
     try { await task() } catch (e) { setMessage(''); setError(e instanceof Error ? e.message : 'Operation unavailable. Check your wallet before retrying a payment.') }
-    finally { operation.current = false; setBusy(false) }
+    finally { operation.current = false; setBusy(false); setActivity(null) }
   }
-  const runPayment = (kind: 'send' | 'move', task: () => Promise<void>) => run(async () => {
-    setPaymentInFlight(kind); setReceipt(null)
-    try { await task() } finally { setPaymentInFlight(null) }
+  const runPayment = (kind: 'send' | 'move', task: () => Promise<void>, keyID: string | null = null) => run(async () => {
+    setPaymentInFlight(kind); setMovingKeyID(keyID); setReceipt(null)
+    try { await task() } finally { setPaymentInFlight(null); setMovingKeyID(null) }
   })
   const runRefresh = (kind: RefreshState['kind'], keyID: string | undefined, task: () => Promise<void>) => run(async () => {
     setRefreshing({ kind, keyID, detail: 'Checking your wallet…' })
@@ -126,13 +131,13 @@ export default function Mountaintops() {
     await reload(fresh)
     if (failure) throw failure
     setMessage('')
-  })
+  }, false, { id: 'connect', title: 'Connecting your wallet', detail: 'Open your wallet if prompted.' })
 
   // Only chain coverage is rechecked. No background address-deposit polling.
   useEffect(() => {
     if (!session) return
     const timer = setInterval(() => {
-      if (!operation.current && !worker.current) void run(async () => { await reload() }, true)
+      if (!operation.current && !worker.current) void run(async () => { await reload(); setMessage('') }, true, { id: 'background', title: 'Updating address status', detail: 'Checking your saved addresses…' })
     }, 60_000)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,7 +156,7 @@ export default function Mountaintops() {
       const next = await reload(fresh)
       setSession({ ...next, primary: receivingKeyID(next.book, next.coverage.stage, result.keyID) }); setCandidate(null)
       setMessage('New address saved and ready to receive.')
-    })
+    }, false, { id: 'save-address', title: 'Saving your address', detail: 'Approve in your wallet if prompted.' })
   }
 
   const mine = async (resumeStage?: number) => {
@@ -180,12 +185,12 @@ export default function Mountaintops() {
             setPausedSearch({ stage: data.stage, next: data.next }); setTarget(String(data.stage))
             setMessage('No match yet. You can keep searching for free.')
           }
-          if (data.kind === 'error') setError(String(data.message))
+          if (data.kind === 'error') { setMessage(''); setError(String(data.message)) }
         }
       }
-      nextWorker.onerror = () => { nextWorker.terminate(); worker.current = null; setSearching(false); setError('Address worker failed. Published addresses remain in your wallet.') }
+      nextWorker.onerror = () => { nextWorker.terminate(); worker.current = null; setSearching(false); setMessage(''); setError('Address worker failed. Published addresses remain in your wallet.') }
       nextWorker.postMessage({ identityKey: fresh.identity, network: fresh.network, minimumStage: minimum, targetStage: chosen, start: resume ?? '1' })
-    })
+    }, false, { id: 'search', title: 'Preparing address search', detail: 'Checking your wallet and address rules…' })
   }
 
   const cancelMine = () => {
@@ -205,6 +210,7 @@ export default function Mountaintops() {
     } catch (e) { setError(e instanceof Error ? e.message : 'Address unavailable') }
   }
   const copyAddress = (displayed: AddressRecord) => {
+    if (copying.current) return
     const fresh = current.current
     if (!fresh) return
     const entry = fresh.book.find(item => item.keyID === displayed.keyID && item.address === displayed.address)
@@ -226,8 +232,9 @@ export default function Mountaintops() {
     try {
       // Start the clipboard write directly in the click, before any await/RPC.
       if (!navigator.clipboard?.writeText) { manualCopy(); return }
-      void navigator.clipboard.writeText(entry.address).then(() => setCopiedAddress(entry.address), manualCopy)
-    } catch { manualCopy() }
+      copying.current = true; setCopyingAddress(entry.address)
+      void navigator.clipboard.writeText(entry.address).then(() => setCopiedAddress(entry.address), manualCopy).finally(() => { copying.current = false; setCopyingAddress(null) })
+    } catch { copying.current = false; setCopyingAddress(null); manualCopy() }
   }
   const checkCoins = (keyID: string) => void runRefresh('single', keyID, async () => {
     const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)!
@@ -272,7 +279,7 @@ export default function Mountaintops() {
     await finishPayment(fresh, () => importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage), { kind: 'move' }, () => {
       setBalances(values => ({ ...values, [keyID]: (values[keyID] ?? []).filter(coin => !coins.some(spent => spent.txid === coin.txid && spent.vout === coin.vout)) }))
     })
-  })
+  }, keyID)
   const reviewPayment = () => {
     if (!session || disabled || unresolvedActions(session.records).length) return
     try {
@@ -319,22 +326,25 @@ export default function Mountaintops() {
       {entry.retiredAt && <p className="small">Receiving is disabled. You can still move earlier payments to your wallet.</p>}
       {pendingExpiry && <p className="expiry-warning">Stop sharing this address. The chain-time notice ends {new Date(pending.deadline * 1000).toISOString().replace('.000Z', ' UTC')}; expiration begins in the following accepted block.</p>}
       <div className="buttons">
-        {!entry.retiredAt && <button className={selected ? 'accent' : 'secondary'} aria-label="Copy address" disabled={Boolean(session?.receivingBlocked) || Boolean(pendingExpiry)} onClick={() => copyAddress(entry)}>{copiedAddress === entry.address ? 'Copied!' : 'Copy address'}</button>}
+        {!entry.retiredAt && <ActionButton variant={selected ? 'accent' : 'secondary'} active={copyingAddress === entry.address} ariaLabel="Copy address" label={copiedAddress === entry.address ? 'Copied!' : 'Copy address'} activeLabel="Copying…" disabled={Boolean(session?.receivingBlocked) || Boolean(pendingExpiry)} onClick={() => copyAddress(entry)} />}
         {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use for receiving</button>}
       </div>
       {copiedAddress === entry.address && <span className="copy-feedback small" role="status">Address copied.</span>}
       {manualCopyAddress === entry.address && <p className="small" role="status">Automatic copy is unavailable. Select the address above and use your browser’s Copy command.</p>}
       {!selected && <><div className="funds-row"><div>{total !== undefined && (total > 0 || checkedPayments[entry.keyID]) ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">{total === undefined ? 'Payments not checked' : 'Not checked for new payments'}</span>}</div><RefreshButton active={refreshing?.kind === 'single' && refreshing.keyID === entry.keyID} disabled={disabled} onClick={() => checkCoins(entry.keyID)} label={entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'} /></div>
-      {Boolean(coins?.length) && <><div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>{paymentHold && <p className="small">{paymentHold}</p>}</>}</>}
+      {Boolean(coins?.length) && <><div className="import-row"><ActionButton active={paymentInFlight === 'move' && movingKeyID === entry.keyID} disabled={disabled || pendingActions.length > 0} label="Move to wallet" activeLabel="Moving…" onClick={() => importMoney(entry.keyID)} /><span className="small">Wallet fees apply.</span></div>{paymentHold && <p className="small">{paymentHold}</p>}</>}</>}
       <details className="technical"><summary>Address details</summary><p>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>{!entry.retiredAt && !pendingExpiry && entry.network === 'mainnet' && longest > 0 && <p>{level === longest ? 'Longest coverage of your saved addresses.' : 'Expires earlier than your longest-lasting saved address.'}</p>}{entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}. New-deposit lookups have stopped permanently.</p>}<p>Key ID {entry.keyID} · address rules satisfied through stage {level}. Payment transaction rules also apply.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside coverage, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership.</p>}</details>
     </article>
   }
 
-  return <main aria-busy={busy || searching}>
+  return <>
+    <div className="sr-only" data-live-progress role="status" aria-live="polite" aria-atomic="true">{activity ? `${activity.title}. ${activity.detail}` : refreshing ? `${refreshing.kind === 'addresses' ? 'Checking your addresses' : 'Checking for payments'}. ${refreshing.detail}` : paymentInFlight ? message : searching ? `Finding an address. ${message}` : copyingAddress ? 'Copying address…' : ''}</div>
+    <main aria-busy={busy || searching}>
     <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
-    {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={connect}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
+    {refreshing ? <RefreshProgress progress={refreshing} /> : activity ? <ActionFeedback activity={{ ...activity, detail: activity.id === 'connect' && message === 'Restoring payments from your wallet…' ? message : activity.detail }} /> : searching ? <ActionFeedback activity={{ id: 'mining', title: 'Finding an address', detail: message }} /> : null}
+    {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><ActionButton variant="accent" active={activity?.id === 'connect'} disabled={disabled} label="Connect wallet" activeLabel="Connecting…" onClick={connect} /><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
       <nav className="view-tabs" aria-label="Payment direction"><button disabled={Boolean(paymentInFlight)} aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button disabled={Boolean(paymentInFlight)} aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
-      <PaymentStatus actions={pendingActions} checkedAt={statusCheckedAt} disabled={disabled} busy={busy} onReview={action => void run(async () => {
+      <PaymentStatus actions={pendingActions} checkedAt={statusCheckedAt} disabled={disabled} activeID={activity?.id ?? null} onReview={action => void run(async () => {
         setError(''); setMessage('')
         try {
           let result = await refreshPaymentStatus(client, session.identity, session.network, session.records, action)
@@ -355,28 +365,27 @@ export default function Mountaintops() {
           if (error instanceof WalletAccountChangedError) clearWalletSession()
           throw error
         }
-      }, true)} />
+      }, true, { id: `review-${action.id}`, title: action.state === 'prepared' ? 'Canceling unfinished payment' : 'Checking payment status', detail: 'Reading the latest result from your wallet…' })} />
       {receipt && <PaymentReceipt payment={receipt} onDone={() => { setReceipt(null); setView('receive') }} onAnother={() => { setReceipt(null); setReview(null); setView('send') }} />}
       {paymentInFlight === 'move' && <section className="moving-payment"><PaymentProgress message={message} moving /></section>}
-      {refreshing && <RefreshProgress progress={refreshing} />}
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
       {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
-      {((message && !paymentInFlight && !refreshing) || error) && <div className="feedback">{message && !searching && !paymentInFlight && !refreshing && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
+      {((message && !searching && !paymentInFlight && !refreshing && !activity) || error) && <div className="feedback">{message && !searching && !paymentInFlight && !refreshing && !activity && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
       {view === 'receive' ? <section className="receive-panel" aria-label="Receive BSV">
         {primary ? card(primary, true) : <div className="empty-state"><h2>Choose a receiving address</h2><p>Find a new address or choose an active one below. Earlier payments remain yours.</p></div>}
         <div className="payments-panel"><div className="section-heading"><h3>Your payments</h3><RefreshButton active={refreshing?.kind === 'payments'} ariaLabel="Refresh payments" label="Refresh" disabled={disabled} onClick={checkAllCoins} /></div>
           {!refreshing && (checkedCount > 0 && !allPaymentsChecked ? <p className="small">{checkedCount} of {session.book.length} addresses checked for new payments.</p> : session.book.some(x => balances[x.keyID] === undefined) && <p className="small">Some payments still need checking.</p>)}
-          {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><span className="received-label">Received</span><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong>{(session.book.length > 1 || entry.retiredAt) && <span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span>}</div><div className="payment-actions"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply</span></div></div>)}
+          {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><span className="received-label">Received</span><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong>{(session.book.length > 1 || entry.retiredAt) && <span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span>}</div><div className="payment-actions"><ActionButton active={paymentInFlight === 'move' && movingKeyID === entry.keyID} disabled={disabled || pendingActions.length > 0} label="Move to wallet" activeLabel="Moving…" onClick={() => importMoney(entry.keyID)} /><span className="small">Wallet fees apply</span></div></div>)}
           {paymentHold && session.book.some(x => balances[x.keyID]?.length) && <p className="small payment-hold">{paymentHold}</p>}
           {!refreshing && allPaymentsChecked && session.book.every(x => balances[x.keyID]?.length === 0) && <p className="small">No available payments found.</p>}
         </div>
-        <details className="address-search"><summary>{suggestedEntry ? 'Use a longer-lasting address' : 'Find a longer-lasting address'}</summary><div className="mining"><div className="section-heading"><p className="small">{suggestedEntry ? 'Already saved. Free to switch.' : 'Searching is free. Saving an address has wallet fees.'}</p>{searching ? <button className="secondary" onClick={cancelMine}>Pause</button> : <button disabled={disabled || session.network !== 'mainnet'} onClick={() => suggestedEntry ? choose(suggestedEntry.keyID) : void mine()}>{suggestedEntry ? 'Use saved address' : pausedSearch ? 'Keep searching' : 'Find an address'}</button>}</div>
+        <details className="address-search"><summary>{suggestedEntry ? 'Use a longer-lasting address' : 'Find a longer-lasting address'}</summary><div className="mining"><div className="section-heading"><p className="small">{suggestedEntry ? 'Already saved. Free to switch.' : 'Searching is free. Saving an address has wallet fees.'}</p>{searching ? <button className="secondary" onClick={cancelMine}>Pause</button> : <ActionButton active={activity?.id === 'search'} disabled={disabled || session.network !== 'mainnet'} label={suggestedEntry ? 'Use saved address' : pausedSearch ? 'Keep searching' : 'Find an address'} activeLabel="Preparing…" onClick={() => suggestedEntry ? choose(suggestedEntry.keyID) : void mine()} />}</div>
           {suggestedEntry && <div className="saved-preview"><p className="coverage">{expirationEstimate(lastCoveredStage(suggestedEntry.address), calendar)}</p><span className="small">Estimated · stage {lastCoveredStage(suggestedEntry.address)}</span></div>}
-          {searching && <p className="notice" role="status">{message}</p>}
-          {candidate && <div className="result"><h3>New address found</h3><p className="coverage">{expirationEstimate(lastCoveredStage(candidate.address), calendar)}</p><div className="lifetime-meta"><span>Estimated · Stage {lastCoveredStage(candidate.address)}</span><button className="text-button" onClick={() => setInfo({ stage: lastCoveredStage(candidate.address), expired: false })}>More info</button></div><p className="small">Save once to recover this address on any device.</p><button disabled={disabled} onClick={() => void publishFound(candidate)}>Save &amp; use address</button><span className="small fee-note">Wallet fees apply to save. Switching saved addresses is free.</span></div>}
-          <details className="advanced"><summary>Advanced search</summary><p className="small">Search runs for up to 30 seconds at a time. Higher stages take more work and pass stricter future address rules.</p>{suggestedEntry && <button disabled={disabled} onClick={() => void mine()}>Find another address</button>}<label>Search target<select value={target} disabled={disabled} onChange={e => setTarget(e.target.value)}><option value="auto">Recommended · about 30 seconds</option>{stages.slice(1).map(row => <option key={row.stage} value={row.stage}>Stage {row.stage} · {expirationEstimate(row.stage, calendar).replace("Not earlier than", "not before")}</option>)}</select></label>
-            {pausedSearch && <><button disabled={disabled} onClick={() => void run(async () => { const fresh = await reload(); await fresh.store.append('search', pausedSearch); await reload(fresh); setMessage('Search progress saved in your wallet.') })}>Save progress</button><p className="small">Wallet fees apply. Otherwise you can repeat this search on another device for free.</p></>}
-            {!searching && savedSearches.map(search => <p key={String(search.stage)}><button disabled={disabled} onClick={() => { setTarget(String(search.stage)); void mine(Number(search.stage)) }}>Resume stage {String(search.stage)}</button> <span className="small">Saved in your wallet · next key ID {String(search.next)}</span></p>)}
+          {session.network !== 'mainnet' && <p className="small">Address search is available on Mainnet.</p>}
+          {candidate && <div className="result"><h3>New address found</h3><p className="coverage">{expirationEstimate(lastCoveredStage(candidate.address), calendar)}</p><div className="lifetime-meta"><span>Estimated · Stage {lastCoveredStage(candidate.address)}</span><button className="text-button" onClick={() => setInfo({ stage: lastCoveredStage(candidate.address), expired: false })}>More info</button></div><p className="small">Save once to recover this address on any device.</p><ActionButton active={activity?.id === 'save-address'} disabled={disabled} label="Save & use address" activeLabel="Saving…" onClick={() => void publishFound(candidate)} /><span className="small fee-note">Wallet fees apply to save. Switching saved addresses is free.</span></div>}
+          <details className="advanced"><summary>Advanced search</summary><p className="small">Search runs for up to 30 seconds at a time. Higher stages take more work and pass stricter future address rules.</p>{suggestedEntry && <ActionButton active={activity?.id === 'search'} disabled={disabled} label="Find another address" activeLabel="Preparing…" onClick={() => void mine()} />}<label>Search target<select value={target} disabled={disabled} onChange={e => setTarget(e.target.value)}><option value="auto">Recommended · about 30 seconds</option>{stages.slice(1).map(row => <option key={row.stage} value={row.stage}>Stage {row.stage} · {expirationEstimate(row.stage, calendar).replace("Not earlier than", "not before")}</option>)}</select></label>
+            {pausedSearch && <><ActionButton active={activity?.id === 'save-progress'} disabled={disabled} label="Save progress" activeLabel="Saving…" onClick={() => void run(async () => { const fresh = await reload(); await fresh.store.append('search', pausedSearch); await reload(fresh); setMessage('Search progress saved in your wallet.') }, false, { id: 'save-progress', title: 'Saving search progress', detail: 'Approve in your wallet if prompted.' })} /><p className="small">Wallet fees apply. Otherwise you can repeat this search on another device for free.</p></>}
+            {!searching && savedSearches.map(search => <p key={String(search.stage)}><ActionButton active={activity?.id === 'search'} disabled={disabled} label={`Resume stage ${search.stage}`} activeLabel="Preparing…" onClick={() => { setTarget(String(search.stage)); void mine(Number(search.stage)) }} /> <span className="small">Saved in your wallet · next key ID {String(search.next)}</span></p>)}
           </details>
         </div></details>
         <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Switching is free for this session. Reconnecting opens your longest-lasting eligible saved address.</p>{session.book.filter(x => x.keyID !== primary?.keyID).map(x => card(x))}<RefreshButton active={refreshing?.kind === 'addresses'} label="Refresh addresses" disabled={disabled} onClick={() => void runRefresh('addresses', undefined, async () => { await reload(); setMessage('Addresses and expiration checked.') })} /></details>
@@ -394,6 +403,7 @@ export default function Mountaintops() {
           }}><option value="sats">sats</option><option value="BSV">BSV</option></select></div>
           <button className="accent" type="submit" disabled={disabled || pendingActions.length > 0 || !recipient || !amount}>Review payment</button>
           {paymentHold && <p className="small">{paymentHold}</p>}
+          {!paymentHold && (!recipient || !amount) && <p className="small">Enter a recipient and amount to continue.</p>}
         </form>
       </section>}
       {history.length > 0 && <details className="activity"><summary>Recent activity <span className="count">{history.length}</span></summary><p className="small">This session only. Your wallet keeps the payment records.</p>{history.map(payment => <details className="activity-payment" key={payment.txid}><summary>{payment.kind === 'move' ? 'Moved to wallet' : 'Sent'}{payment.satoshis !== undefined ? ` · ${payment.satoshis.toLocaleString()} sats` : ''}</summary>{payment.recipient && <p className="small">To {payment.recipient}</p>}<p className="transaction">{payment.txid}</p></details>)}</details>}
@@ -402,5 +412,5 @@ export default function Mountaintops() {
     <details className="help"><summary>Expiration, fees & recovery</summary><h3>When does my address expire?</h3><p>Each address shows a month-and-year estimate and the stage it meets. Choose More info for the schedule. Before block 1,000,000 arrives, estimates can move earlier or later. Low transaction volume can delay expiration.</p><p>When an address expires, stop using it everywhere. Mountaintops disables receiving and stops looking for new deposits. Earlier coins remain yours and can still be moved to your wallet.</p><h3>Can I recover on another device?</h3><p>Connect the same BRC-100 wallet account. Your saved addresses and coin evidence come from the wallet, without browser data or files from this device. Keep your wallet account and its recovery service available.</p><h3>What costs money?</h3><p>Searching and pausing are free. Saving a new address also makes it your receiving address in one encrypted 1-satoshi wallet record. Switching saved addresses is free for this session; reconnecting opens the longest-lasting eligible saved address. Saving search progress also needs a wallet record. Network and wallet service fees may apply to records. Moving or sending coins also incurs wallet fees.</p><h3>Does a longer-lasting address cover every payment?</h3><p>No. Funding TXID rules also apply, and from stage 13 the transaction must use version 1. Mountaintops prepares eligible transactions within a bounded work budget. External senders may create payments outside those rules. Eligibility never changes who owns the coins.</p><details><summary>Technical status</summary>{session && <p>{session.network} · checked through block {session.coverage.height.toLocaleString()} · stage {session.coverage.stage}</p>}<p>Client-only. Encrypted PushDrop recovery records use your BRC-100 wallet’s baskets. WhatsOnChain supplies chain data and historical recovery; unavailable or incomplete data cannot establish a balance.</p></details></details>
     {session && info && <ReceiveInfo stage={info.stage} expired={info.expired} coverage={session.coverage} onClose={() => setInfo(null)} />}
     <footer><span>Public transactions. No privacy.</span><div><a href="https://whatsonchain.com" target="_blank" rel="noreferrer">WhatsOnChain</a><a href="https://docs.projectbabbage.com/docs/metanet-client/funding" target="_blank" rel="noreferrer">Wallet help</a></div></footer>
-  </main>
+  </main></>
 }

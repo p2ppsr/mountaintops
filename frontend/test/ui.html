@@ -9,6 +9,49 @@ const paymentRoots = new Map()
 let savedAddress
 window.CWI = wallet
 const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated demo · no real funds · 0 simulated actions'; document.body.prepend(counter)
+let holdWalletCall = new URL(location.href).searchParams.has('hold-connect') ? { method: 'getNetwork', fail: false } : null
+window.fixtureHoldWalletCall = (method, fail = false) => { holdWalletCall = { method, fail } }
+const holdAction = async label => new Promise(resolve => {
+  const finish = document.createElement('button'); finish.textContent = label
+  finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+})
+const pauseWalletCall = async method => {
+  if (holdWalletCall?.method !== method) return
+  const held = holdWalletCall; holdWalletCall = null
+  await holdAction('Complete simulated action')
+  if (held.fail) throw new Error('Synthetic wallet request declined')
+}
+for (const method of ['getNetwork', 'getPublicKey', 'listActions', 'createAction', 'abortAction']) {
+  const original = wallet[method].bind(wallet)
+  wallet[method] = async args => {
+    await pauseWalletCall(method)
+    return original(args)
+  }
+}
+if (new URL(location.href).searchParams.has('hold-copy')) Object.defineProperty(navigator.clipboard, 'writeText', { value: async () => { await holdAction('Complete simulated copy') } })
+if (new URL(location.href).searchParams.has('synthetic-worker')) {
+  let workers = 0
+  window.fixtureWorkerCount = () => workers
+  window.Worker = class {
+    constructor() { workers++; this.controls = []; this.stopped = false }
+    terminate() { this.stopped = true; this.controls.forEach(button => button.remove()) }
+    postMessage(args) {
+      const send = data => { if (!this.stopped) this.onmessage?.({ data }) }
+      queueMicrotask(() => {
+        send({ kind: 'started' }); send({ kind: 'progress', stage: args.minimumStage, next: '100', elapsed: 1000 })
+        for (const [label, kind] of [['Finish simulated search', 'found'], ['Pause simulated search', 'paused'], ['Fail simulated search', 'error']]) {
+          const button = document.createElement('button'); button.textContent = label
+          button.onclick = () => {
+            const found = kind === 'found' ? firstMatch(args.identityKey, args.minimumStage, args.network, 10000n) : null
+            if (kind === 'found' && !found) throw new Error('Synthetic worker fixture has no eligible address')
+            send({ kind, ...found, stage: args.minimumStage, next: '100', message: 'Synthetic search error' })
+          }
+          this.controls.push(button); counter.append(button)
+        }
+      })
+    }
+  }
+}
 const create = wallet.createAction.bind(wallet)
 let actions = 0
 let submissions = 0
@@ -100,6 +143,7 @@ if (pendingStatus) {
   let aborts = 0
   window.fixtureAbortCalls = () => aborts
   wallet.abortAction = async args => {
+    await pauseWalletCall('abortAction')
     aborts++
     if (args.reference === pending.txid && pending.status === 'nosend') { pending.status = 'failed'; return { aborted: true } }
     return abort(args)
