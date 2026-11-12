@@ -39,6 +39,18 @@
 .review-recipient{border-top:1px solid #344b55;padding-top:22px}
 .review-actions .accent{flex:1}
 .review-fees{margin-top:24px}
+.payment-progress{display:flex;align-items:center;gap:18px;padding-bottom:24px;margin-bottom:24px;border-bottom:1px solid #35554e;text-align:left}
+.payment-motion{position:relative;display:grid;place-items:center;flex:0 0 64px;width:64px;height:64px;color:#bce9d7;background:#22463e;border-radius:50%}
+.payment-motion svg{width:34px;height:34px;animation:payment-flight 2.4s ease-in-out infinite}
+.payment-orbit{position:absolute;inset:0;border:2px solid #aee1cf26;border-top-color:#bce9d7;border-right-color:#bce9d7; border-radius:50%;animation:payment-orbit 1.8s linear infinite}
+.payment-progress p{margin:0;line-height:1.5}
+.progress-title{font-size:.95rem;font-weight:650;color:#e4f2ed}
+.payment-progress .progress-phase{font-size:.82rem;color:#b8d6cd;margin-top:3px}
+.payment-progress .progress-hint{font-size:.75rem;color:#a9c1c8;margin-top:6px}
+.moving-payment .payment-progress{border:0;padding:0;margin:0}
+@keyframes payment-orbit{to{transform:rotate(360deg)}}
+@keyframes payment-flight{0%,100%{transform:translate(-1px,1px)}50%{transform:translate(2px,-2px)}}
+@media(prefers-reduced-motion:reduce){.payment-orbit,.payment-motion svg{animation:none}}
 .amount-entry{display:flex;gap:10px;margin:-12px 0 24px}
 .amount-entry input{min-width:0;font-size:1.45rem;letter-spacing:-.025em}
 .amount-entry select{width:100px;flex-shrink:0}

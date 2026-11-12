@@ -7,6 +7,7 @@ import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveU
 import ReceiveInfo from './ReceiveInfo.tsx'
 import PaymentStatus from './PaymentStatus.tsx'
 import PaymentReceipt, { type PaymentReceiptData } from './PaymentReceipt.tsx'
+import PaymentProgress from './PaymentProgress.tsx'
 import PaymentReview, { type PaymentDraft } from './PaymentReview.tsx'
 import { bsvAmount, parseAmount, type AmountUnit } from './paymentAmount.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
@@ -43,6 +44,7 @@ export default function Mountaintops() {
   const [unit, setUnit] = useState<AmountUnit>('sats')
   const [review, setReview] = useState<PaymentDraft | null>(null)
   const [receipt, setReceipt] = useState<PaymentReceiptData | null>(null)
+  const [paymentInFlight, setPaymentInFlight] = useState<'send' | 'move' | null>(null)
   const [history, setHistory] = useState<PaymentReceiptData[]>([])
   const [searching, setSearching] = useState(false)
   const [info, setInfo] = useState<{ stage: number; expired: boolean } | null>(null)
@@ -60,6 +62,10 @@ export default function Mountaintops() {
     try { await task() } catch (e) { setMessage(''); setError(e instanceof Error ? e.message : 'Operation unavailable. Check your wallet before retrying a payment.') }
     finally { operation.current = false; setBusy(false) }
   }
+  const runPayment = (kind: 'send' | 'move', task: () => Promise<void>) => run(async () => {
+    setPaymentInFlight(kind); setReceipt(null)
+    try { await task() } finally { setPaymentInFlight(null) }
+  })
 
   const clearWalletSession = () => {
     setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setReceipt(null); setReview(null); setRecipient(''); setAmount('')
@@ -216,7 +222,7 @@ export default function Mountaintops() {
     // metadata read into a payment failure, or wait for the wallet's mined proof.
   }
 
-  const importMoney = (keyID: string) => void run(async () => {
+  const importMoney = (keyID: string) => void runPayment('move', async () => {
     const fresh = await reload()
     if (unresolvedActions(fresh.records).length) throw new Error('Review the unfinished wallet action before another payment.')
     const entry = fresh.book.find(x => x.keyID === keyID)!
@@ -234,7 +240,7 @@ export default function Mountaintops() {
       setReview({ recipient: destination, satoshis }); setReceipt(null); setError(''); setMessage('')
     } catch (error) { setError(error instanceof Error ? error.message : 'Check the recipient and amount.'); setMessage('') }
   }
-  const send = () => void run(async () => {
+  const send = () => void runPayment('send', async () => {
     if (!review) throw new Error('Review the recipient and amount before sending.')
     const intent = review
     const fresh = await reload()
@@ -283,7 +289,7 @@ export default function Mountaintops() {
   return <main aria-busy={busy || searching}>
     <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
     {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={connect}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
-      <nav className="view-tabs" aria-label="Payment direction"><button aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
+      <nav className="view-tabs" aria-label="Payment direction"><button disabled={Boolean(paymentInFlight)} aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button disabled={Boolean(paymentInFlight)} aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
       <PaymentStatus actions={pendingActions} checkedAt={statusCheckedAt} disabled={disabled} busy={busy} onReview={action => void run(async () => {
         setError(''); setMessage('')
         try {
@@ -307,9 +313,10 @@ export default function Mountaintops() {
         }
       }, true)} />
       {receipt && <PaymentReceipt payment={receipt} onDone={() => { setReceipt(null); setView('receive') }} onAnother={() => { setReceipt(null); setReview(null); setView('send') }} />}
+      {paymentInFlight === 'move' && <section className="moving-payment"><PaymentProgress message={message} moving /></section>}
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
       {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
-      {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
+      {((message && !paymentInFlight) || error) && <div className="feedback">{message && !searching && !paymentInFlight && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
       {view === 'receive' ? <section className="receive-panel" aria-label="Receive BSV">
         {primary ? card(primary, true) : <div className="empty-state"><h2>Choose a receiving address</h2><p>Find a new address or choose an active one below. Earlier payments remain yours.</p></div>}
         <div className="payments-panel"><div className="section-heading"><h3>Your payments</h3><button className="secondary" aria-label="Refresh payments" disabled={disabled} onClick={checkAllCoins}>Refresh</button></div>
@@ -328,7 +335,7 @@ export default function Mountaintops() {
           </details>
         </div></details>
         <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Switching is free for this session. Reconnecting opens your longest-lasting eligible saved address.</p>{session.book.filter(x => x.keyID !== primary?.keyID).map(x => card(x))}<button className="secondary" disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Addresses and expiration checked.') })}>Refresh addresses</button></details>
-      </section> : receipt ? null : review ? <PaymentReview payment={review} busy={disabled || pendingActions.length > 0} onBack={() => setReview(null)} onSend={send} /> : <section className="send-panel">
+      </section> : receipt ? null : review ? <PaymentReview payment={review} busy={disabled || pendingActions.length > 0} sending={paymentInFlight === 'send'} phase={message} onBack={() => setReview(null)} onSend={send} /> : <section className="send-panel">
         <h2>Send BSV</h2>
         <form onSubmit={event => { event.preventDefault(); reviewPayment() }}>
           <label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="Paste a BSV address" autoComplete="off" spellCheck={false} maxLength={80} /></label>

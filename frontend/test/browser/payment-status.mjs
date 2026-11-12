@@ -81,6 +81,26 @@ try {
       assert.equal(await page.getByRole('button', { name: 'Move to wallet' }).isEnabled(), true)
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
 
+      // Progress stays visible through a wallet wait, with no invented percentage.
+      await connect('hold-submit'); await draft('1000')
+      await page.getByRole('button', { name: 'Send payment', exact: true }).click()
+      const progress = page.getByRole('status', { name: 'Payment progress' })
+      await progress.getByText('Submitting to your wallet…', { exact: true }).waitFor()
+      assert.equal(await page.getByRole('button', { name: 'Sending…', exact: true }).isDisabled(), true)
+      assert.equal(await page.getByRole('region', { name: 'Review payment' }).getByText(destination, { exact: true }).isVisible(), true)
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
+      assert.equal(await page.locator('.payment-orbit').evaluate(element => getComputedStyle(element).animationName), 'payment-orbit')
+      await shot('sending')
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      assert.equal(await page.locator('.payment-orbit').evaluate(element => getComputedStyle(element).animationName), 'none')
+      assert.equal(await page.locator('.payment-motion svg').evaluate(element => getComputedStyle(element).animationName), 'none')
+      await page.emulateMedia({ reducedMotion: 'no-preference' })
+      await page.getByRole('button', { name: 'Complete simulated payment', exact: true }).click()
+      await receipt.getByText('Payment sent', { exact: true }).waitFor(); await idle()
+      assert.equal(await progress.count(), 0)
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+
       // Truly unresolved outcomes are distinct; checking cannot create a payment.
       await connect('pending=unprocessed&payments')
       await unresolved.getByRole('heading', { name: 'Check your wallet' }).waitFor()
@@ -99,6 +119,16 @@ try {
       assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
 
       if (width === 1440) {
+        await connect('payments&hold-submit')
+        await page.getByRole('button', { name: 'Move to wallet', exact: true }).click()
+        await page.getByRole('status', { name: 'Payment progress' }).getByText('Submitting to your wallet…', { exact: true }).waitFor()
+        await page.getByText('Moving to your wallet', { exact: true }).waitFor()
+        await page.getByRole('button', { name: 'Complete simulated payment', exact: true }).click()
+        await receipt.getByText('Moved to your wallet', { exact: true }).waitFor(); await idle()
+        assert.equal(await page.getByRole('status', { name: 'Payment progress' }).count(), 0)
+        assert.equal(await page.getByRole('button', { name: 'Move to wallet', exact: true }).count(), 0)
+        assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+
         // Cancel is checked against fresh wallet history, never a stale button.
         await connect('pending=nosend')
         await page.evaluate(() => { window.fixtureBlockRecoveryReads(); window.fixtureSetStatus('unproven') })

@@ -16,6 +16,12 @@ window.fixtureSubmissionCount = () => submissions
 window.fixtureSetNetwork = network => { wallet.getNetwork = async () => ({ network }) }
 wallet.createAction = async args => {
   counter.textContent = `Isolated demo · no real funds · ${++actions} simulated actions`
+  if (args.options?.sendWith && new URL(location.href).searchParams.has('hold-submit')) {
+    await new Promise(resolve => {
+      const finish = document.createElement('button'); finish.textContent = 'Complete simulated payment'
+      finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+    })
+  }
   const result = await create(args)
   if (args.options?.sendWith) {
     submissions++
