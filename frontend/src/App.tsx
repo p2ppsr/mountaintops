@@ -7,9 +7,9 @@ import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveU
 import ReceiveInfo from './ReceiveInfo.tsx'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { availableRetainedCoins, refreshCoins, type Coin } from './coins.ts'
-import { importCoins, sendCoins, unfinishedWalletActions } from './actions.ts'
+import { importCoins, sendCoins } from './actions.ts'
 import { preferCompatibleTransport } from './walletClient.ts'
-import { walletActionStatus, walletStatusMessage } from './walletActionState.ts'
+import { paymentActionRecords, refreshPaymentStatus, WalletAccountChangedError, walletStatusMessage } from './walletActionState.ts'
 import './style.css'
 
 const client = new WalletClient('auto')
@@ -55,12 +55,16 @@ export default function Mountaintops() {
     finally { operation.current = false; setBusy(false) }
   }
 
+  const clearWalletSession = () => {
+    setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
+  }
+
   const reload = async (previous: Session | null = current.current): Promise<Session> => {
     await preferCompatibleTransport(client)
     const { network } = await client.getNetwork({})
     const { publicKey: identity } = await client.getPublicKey({ identityKey: true })
     if (previous && (previous.identity !== identity || previous.network !== network)) {
-      setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
+      clearWalletSession()
       throw new Error('Wallet account or network changed. Connect again to load its own records.')
     }
     const store = previous?.store ?? new WalletRecords(client, identity, network)
@@ -74,7 +78,7 @@ export default function Mountaintops() {
     const receivingBlocked = await applyExpirations(book, coverage, store)
     records = await store.load()
     if (!receivingBlocked) book = bookFromRecords(identity, network, records)
-    records = [...records, ...await unfinishedWalletActions(client, network)]
+    records = await paymentActionRecords(client, network, [...records, ...(previous?.records.filter(record => record.kind === 'action' && record.clock === 0) ?? [])])
     const next = { identity, network, store, records, book, coverage, primary: receivingBlocked ? null : receivingKeyID(book, coverage.stage, previous?.primary), receivingBlocked }
     setSession(next)
     setStatusCheckedAt(Date.now())
@@ -255,14 +259,21 @@ export default function Mountaintops() {
       {pendingActions.length > 0 && <section className="warning" aria-label="Wallet payment status"><h2>{pendingActions.every(action => action.state === 'awaiting confirmation') ? 'Submitted; waiting for confirmation' : 'Check your wallet before continuing'}</h2><p>Do not send these payments again. Confirmation may take time after submission.</p>{statusCheckedAt && <p className="small">Last checked {new Date(statusCheckedAt).toLocaleTimeString()}.</p>}{pendingActions.map(action => <div key={String(action.id)}>
         <p>{action.state === 'awaiting confirmation' ? walletStatusMessage('unproven') : action.state === 'prepared' ? 'This payment is prepared but has not been submitted.' : walletStatusMessage('unknown')}</p>
         <details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
-        const fresh = await reload()
-        if (action.state === 'prepared' && typeof action.reference === 'string') {
-          const aborted = await client.abortAction({ reference: action.reference })
-          if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
-          await reload(fresh); setMessage('Unsent payment canceled.')
-        } else {
-          const status = await walletActionStatus(client, action)
-          await reload(fresh); setMessage(status === 'unproven' ? 'Payment status refreshed. Still waiting for confirmation.' : walletStatusMessage(status))
+        try {
+          let result = await refreshPaymentStatus(client, session.identity, session.network, session.records, action)
+          let canceled = false
+          const prepared = result.records.find(record => record.kind === 'action' && record.data.id === action.id && record.data.state === 'prepared' && record.data.reference === action.reference)
+          if (action.state === 'prepared' && typeof action.reference === 'string' && prepared) {
+            const aborted = await client.abortAction({ reference: action.reference })
+            if (!aborted.aborted) throw new Error('Wallet did not acknowledge cancellation')
+            canceled = true
+            result = await refreshPaymentStatus(client, session.identity, session.network, result.records, action)
+          }
+          setSession({ ...session, records: result.records }); setStatusCheckedAt(Date.now())
+          setMessage(canceled ? 'Unsent payment canceled.' : result.status === 'unproven' ? 'Payment status refreshed. Still waiting for confirmation.' : walletStatusMessage(result.status))
+        } catch (error) {
+          if (error instanceof WalletAccountChangedError) clearWalletSession()
+          throw error
         }
       })}>{action.state === 'prepared' ? 'Cancel unsent payment' : 'Refresh payment status'}</button></div>)}</section>}
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}

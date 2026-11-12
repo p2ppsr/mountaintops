@@ -50,7 +50,20 @@ const pendingStatus = new URL(location.href).searchParams.get('pending')
 if (pendingStatus) {
   const pending = { txid: 'a'.repeat(64), status: pendingStatus, satoshis: 0, isOutgoing: true, version: 1, lockTime: 0, labels: ['mountaintops actions v1'], description: 'Synthetic payment waiting for wallet status' }
   wallet.state.actions.push(pending)
+  const abort = wallet.abortAction.bind(wallet)
+  let aborts = 0
+  window.fixtureAbortCalls = () => aborts
+  wallet.abortAction = async args => {
+    aborts++
+    if (args.reference === pending.txid && pending.status === 'nosend') { pending.status = 'failed'; return { aborted: true } }
+    return abort(args)
+  }
   window.fixtureSetStatus = status => { pending.status = status }
+  window.fixtureAddConflict = () => { wallet.state.actions.push({ ...pending, status: 'failed' }) }
+  window.fixtureBlockRecoveryReads = () => {
+    wallet.listOutputs = async () => { throw new Error('Status refresh accessed wallet records') }
+    window.fetch = async () => { throw new Error('Status refresh accessed chain coverage') }
+  }
 }
 await import('../src/main.tsx')
 </script></body></html>

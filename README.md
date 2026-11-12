@@ -87,3 +87,13 @@ screenshots. The status API supplies no submission timestamp, so the UI reports
 the observed check time rather than inventing elapsed submission time. Release
 must retain the immutable asset bridge and existing CARS availability rules;
 rollback is the prior compatible frontend, never deletion of wallet records.
+
+The second validation pass gives payment status its own read path using only
+`getPublicKey`, `getNetwork` and `listActions`; it never calls the general reload,
+coverage scanner, recovery store or expiration persistence. Conflicting and
+unfamiliar statuses block admission, and a previously observed unresolved action
+missing from a later response remains blocked in that session. Legacy final
+records are resolved only in memory; the existing record-only unproven exception
+is retained. A stale cancel button cannot abort an action now reported submitted.
+The browser regression deliberately refuses recovery/chain reads during status
+refresh; CI installs Chromium and runs this regression as well as unit checks.
