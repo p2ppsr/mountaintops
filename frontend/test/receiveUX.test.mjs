@@ -1,11 +1,30 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ANCHOR_HEIGHT, NOTICE_SECONDS, eligibilityTime, assertReceivable } from '../../shared/brc234.ts'
-import { calendarEstimate, stageEstimate, expirationEstimate, monthYear, receivingKeyID } from '../src/receiveUX.ts'
+import { AddressCheckRequiredError, assertCopyableAddress, calendarEstimate, stageEstimate, expirationEstimate, monthYear, receivingKeyID } from '../src/receiveUX.ts'
 import { readCoverage } from '../src/coverageClient.ts'
 
 const anchor = Date.parse('2030-08-31T12:34:56Z') / 1000
 const coverage = { network: 'mainnet', height: ANCHOR_HEIGHT - 144, anchorMtp: null, tipMtp: anchor - 86400 }
+
+test('copy uses a bounded fresh eligibility snapshot and requires a new click after stale or invalid time', () => {
+  const entry = { keyID: '1', address: '1Ktest', network: 'mainnet', retiredAt: null }
+  const snapshot = { ...coverage, stage: 0, checkedAt: 100000, state: null }
+  assert.doesNotThrow(() => assertCopyableAddress(entry, snapshot, null, 100000))
+  assert.doesNotThrow(() => assertCopyableAddress(entry, snapshot, null, 190000))
+  for (const now of [190001, 99999]) assert.throws(() => assertCopyableAddress(entry, snapshot, null, now), AddressCheckRequiredError)
+  assert.throws(() => assertCopyableAddress(entry, { ...snapshot, checkedAt: NaN }, null, 100000), AddressCheckRequiredError)
+})
+
+test('copy never bypasses retirement, active/pending exclusion, blocked receiving or the network boundary', () => {
+  const entry = { keyID: '1', address: '1Ktest', network: 'mainnet', retiredAt: null }
+  const snapshot = { ...coverage, stage: 0, checkedAt: 100000, state: null }
+  assert.throws(() => assertCopyableAddress({ ...entry, retiredAt: { height: 1000002 } }, snapshot, null, 100000), /Expired/)
+  assert.throws(() => assertCopyableAddress(entry, { ...snapshot, stage: 1 }, null, 100000), /Expired/)
+  assert.throws(() => assertCopyableAddress(entry, { ...snapshot, state: { pending: { target: 1 } } }, null, 100000), /expiring/)
+  assert.throws(() => assertCopyableAddress(entry, snapshot, 'Receiving blocked', 100000), /Receiving blocked/)
+  assert.throws(() => assertCopyableAddress(entry, { ...snapshot, network: 'testnet' }, null, 100000), /network changed/)
+})
 
 test('pre-anchor estimates project from validated chain time, including the notice round and following block', () => {
   const calendar = calendarEstimate(coverage)

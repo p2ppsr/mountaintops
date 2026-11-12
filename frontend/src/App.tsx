@@ -3,7 +3,7 @@ import { PublicKey, WalletClient } from '@bsv/sdk'
 import { addressMatches, assertReceivable, coverageLabel, lastCoveredStage, stages, type AddressRecord, type Network } from '../../shared/brc234.ts'
 import { WalletRecords, type RecoveryRecord } from './walletRecords.ts'
 import { applyExpirations, bookFromRecords, validateAddress } from './addressBook.ts'
-import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveUX.ts'
+import { AddressCheckRequiredError, assertCopyableAddress, calendarEstimate, expirationEstimate, receivingKeyID } from './receiveUX.ts'
 import ReceiveInfo from './ReceiveInfo.tsx'
 import PaymentStatus from './PaymentStatus.tsx'
 import PaymentReceipt, { type PaymentReceiptData } from './PaymentReceipt.tsx'
@@ -45,6 +45,8 @@ export default function Mountaintops() {
   const [review, setReview] = useState<PaymentDraft | null>(null)
   const [receipt, setReceipt] = useState<PaymentReceiptData | null>(null)
   const [paymentInFlight, setPaymentInFlight] = useState<'send' | 'move' | null>(null)
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
+  const [manualCopyAddress, setManualCopyAddress] = useState<string | null>(null)
   const [history, setHistory] = useState<PaymentReceiptData[]>([])
   const [searching, setSearching] = useState(false)
   const [info, setInfo] = useState<{ stage: number; expired: boolean } | null>(null)
@@ -55,6 +57,11 @@ export default function Mountaintops() {
   current.current = session
 
   useEffect(() => () => { worker.current?.terminate() }, [])
+  useEffect(() => {
+    if (!copiedAddress) return
+    const timer = setTimeout(() => setCopiedAddress(null), 2000)
+    return () => clearTimeout(timer)
+  }, [copiedAddress])
   const run = async (task: () => Promise<void>, quiet = false) => {
     if (operation.current) return
     operation.current = true; setBusy(true)
@@ -68,6 +75,7 @@ export default function Mountaintops() {
   })
 
   const clearWalletSession = () => {
+    setCopiedAddress(null); setManualCopyAddress(null)
     setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setReceipt(null); setReview(null); setRecipient(''); setAmount('')
   }
 
@@ -189,6 +197,31 @@ export default function Mountaintops() {
       setSession({ ...fresh, primary: keyID }); setError(''); setMessage('Receiving address changed. Switching is free.')
     } catch (e) { setError(e instanceof Error ? e.message : 'Address unavailable') }
   }
+  const copyAddress = (displayed: AddressRecord) => {
+    const fresh = current.current
+    if (!fresh) return
+    const entry = fresh.book.find(item => item.keyID === displayed.keyID && item.address === displayed.address)
+    try {
+      if (!entry) throw new Error('Address changed. Choose the current receiving address.')
+      assertCopyableAddress(entry, fresh.coverage, fresh.receivingBlocked)
+    } catch (error) {
+      if (error instanceof AddressCheckRequiredError && !operation.current) {
+        void run(async () => { await reload(); setMessage('Address checked. Click Copy address to copy it.') })
+      } else { setMessage(''); setError(error instanceof AddressCheckRequiredError ? 'Address status is updating. Copy it when the check finishes.' : error instanceof Error ? error.message : 'Address unavailable.') }
+      return
+    }
+    const manualCopy = () => {
+      setCopiedAddress(null); setManualCopyAddress(entry.address)
+      const node = document.getElementById(`address-${entry.keyID}`)
+      if (node) { const range = document.createRange(); range.selectNodeContents(node); const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range) }
+    }
+    setError(''); setMessage(''); setManualCopyAddress(null)
+    try {
+      // Start the clipboard write directly in the click, before any await/RPC.
+      if (!navigator.clipboard?.writeText) { manualCopy(); return }
+      void navigator.clipboard.writeText(entry.address).then(() => setCopiedAddress(entry.address), manualCopy)
+    } catch { manualCopy() }
+  }
   const checkCoins = (keyID: string) => void run(async () => {
     const fresh = await reload(); const entry = fresh.book.find(x => x.keyID === keyID)!
     setCheckedPayments(x => ({ ...x, [keyID]: false }))
@@ -272,14 +305,16 @@ export default function Mountaintops() {
     const expiration = entry.retiredAt ? 'Expired — do not send here' : pendingExpiry ? 'Expiration pending — stop sharing' : entry.network !== 'mainnet' ? 'No testnet expiration schedule' : expirationEstimate(level, calendar).replace(/^Not earlier than /, 'Estimated expiry: ')
     return <article className={`address-card ${selected ? 'selected' : ''} ${entry.retiredAt ? 'expired' : ''}`} key={entry.keyID}>
       <div className="card-heading"><h3>{name}</h3><span className={`badge ${entry.retiredAt || pendingExpiry ? 'caution' : ''}`}>{entry.retiredAt ? 'Expired' : pendingExpiry ? 'Expiring' : 'Active'}</span></div>
-      <code className="address">{entry.address}</code>
+      <code className="address" id={`address-${entry.keyID}`}>{entry.address}</code>
       <div className="expiry-summary"><p className={entry.retiredAt || pendingExpiry ? 'expiry-warning' : 'coverage'}>{expiration}</p>{entry.network === 'mainnet' && <button className="text-button" onClick={() => setInfo({ stage: level, expired: Boolean(entry.retiredAt) })} aria-label={`More info about stage ${level} address expiration`}>More info</button>}</div>
       {entry.retiredAt && <p className="small">Receiving is disabled. You can still move earlier payments to your wallet.</p>}
       {pendingExpiry && <p className="expiry-warning">Stop sharing this address. The chain-time notice ends {new Date(pending.deadline * 1000).toISOString().replace('.000Z', ' UTC')}; expiration begins in the following accepted block.</p>}
       <div className="buttons">
-        {!entry.retiredAt && <button className={selected ? 'accent' : 'secondary'} disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => void run(async () => { const fresh = await reload(); if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked); assertReceivable(fresh.book.find(x => x.keyID === entry.keyID)!, fresh.coverage.stage); await navigator.clipboard.writeText(entry.address); setMessage('Address copied. Share its expiration information too.'); })}>Copy address</button>}
+        {!entry.retiredAt && <button className={selected ? 'accent' : 'secondary'} aria-label="Copy address" disabled={Boolean(session?.receivingBlocked) || Boolean(pendingExpiry)} onClick={() => copyAddress(entry)}>{copiedAddress === entry.address ? 'Copied!' : 'Copy address'}</button>}
         {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use for receiving</button>}
       </div>
+      {copiedAddress === entry.address && <span className="copy-feedback small" role="status">Address copied.</span>}
+      {manualCopyAddress === entry.address && <p className="small" role="status">Automatic copy is unavailable. Select the address above and use your browser’s Copy command.</p>}
       {!selected && <><div className="funds-row"><div>{total !== undefined && (total > 0 || checkedPayments[entry.keyID]) ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">{total === undefined ? 'Payments not checked' : 'Not checked for new payments'}</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
       {Boolean(coins?.length) && <><div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>{paymentHold && <p className="small">{paymentHold}</p>}</>}</>}
       <details className="technical"><summary>Address details</summary><p>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>{!entry.retiredAt && !pendingExpiry && entry.network === 'mainnet' && longest > 0 && <p>{level === longest ? 'Longest coverage of your saved addresses.' : 'Expires earlier than your longest-lasting saved address.'}</p>}{entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}. New-deposit lookups have stopped permanently.</p>}<p>Key ID {entry.keyID} · address rules satisfied through stage {level}. Payment transaction rules also apply.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside coverage, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership.</p>}</details>

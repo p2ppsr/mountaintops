@@ -14,6 +14,11 @@ let actions = 0
 let submissions = 0
 window.fixtureSubmissionCount = () => submissions
 window.fixtureSetNetwork = network => { wallet.getNetwork = async () => ({ network }) }
+window.fixtureBlockCopyReads = () => {
+  const blocked = async () => { throw new Error('Copy triggered a wallet or chain read') }
+  wallet.getPublicKey = wallet.getNetwork = wallet.listOutputs = wallet.listActions = blocked
+  window.fetch = blocked
+}
 wallet.createAction = async args => {
   counter.textContent = `Isolated demo · no real funds · ${++actions} simulated actions`
   if (args.options?.sendWith && new URL(location.href).searchParams.has('hold-submit')) {

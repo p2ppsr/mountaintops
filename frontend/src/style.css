@@ -17,6 +17,7 @@
 .payment-status-details p{font-size:.82rem}
 .payment-status-details .transaction{margin-bottom:8px}
 .received-label{font-size:.75rem;font-weight:600;color:#b3e2cd}
+.copy-feedback{display:block;margin-top:9px;color:#b3e2cd}
 .payment-hold{margin-bottom:0}
 .expiry-summary{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:12px 0}
 .expiry-summary p{margin:0}
