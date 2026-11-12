@@ -202,7 +202,7 @@ export async function refreshCoins(wallet: WalletInterface, store: WalletRecords
   const alreadyRetained = new Set(retained.coins.map(coin => `${coin.txid}.${coin.vout}`))
   const newCoins = found.filter(coin => !alreadyRetained.has(`${coin.txid}.${coin.vout}`))
   if (newCoins.length) {
-    progress('Saving new deposit evidence in your wallet for device-independent recovery…')
+    progress('Updating your payments…')
     await retainCoins(wallet, entry, newCoins)
     retained = await retainedCoins(wallet, entry)
   }

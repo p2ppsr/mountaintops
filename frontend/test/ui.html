@@ -8,12 +8,101 @@ const wallet = new FixtureWallet()
 const paymentRoots = new Map()
 let savedAddress
 window.CWI = wallet
-const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated fixture · 0 wallet transactions'; document.body.prepend(counter)
+const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated demo · no real funds · 0 simulated actions'; document.body.prepend(counter)
+let holdWalletCall = new URL(location.href).searchParams.has('hold-connect') ? { method: 'getNetwork', fail: false } : null
+window.fixtureHoldWalletCall = (method, fail = false) => { holdWalletCall = { method, fail } }
+const holdAction = async label => new Promise(resolve => {
+  const finish = document.createElement('button'); finish.textContent = label
+  finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+})
+const pauseWalletCall = async method => {
+  if (holdWalletCall?.method !== method) return
+  const held = holdWalletCall; holdWalletCall = null
+  await holdAction('Complete simulated action')
+  if (held.fail) throw new Error('Synthetic wallet request declined')
+}
+for (const method of ['getNetwork', 'getPublicKey', 'listActions', 'createAction', 'abortAction']) {
+  const original = wallet[method].bind(wallet)
+  wallet[method] = async args => {
+    await pauseWalletCall(method)
+    return original(args)
+  }
+}
+if (new URL(location.href).searchParams.has('hold-copy')) Object.defineProperty(navigator.clipboard, 'writeText', { value: async () => { await holdAction('Complete simulated copy') } })
+if (new URL(location.href).searchParams.has('synthetic-worker')) {
+  let workers = 0
+  window.fixtureWorkerCount = () => workers
+  window.Worker = class {
+    constructor() { workers++; this.controls = []; this.stopped = false }
+    terminate() { this.stopped = true; this.controls.forEach(button => button.remove()) }
+    postMessage(args) {
+      const send = data => { if (!this.stopped) this.onmessage?.({ data }) }
+      queueMicrotask(() => {
+        send({ kind: 'started' }); send({ kind: 'progress', stage: args.minimumStage, next: '100', elapsed: 1000 })
+        for (const [label, kind] of [['Finish simulated search', 'found'], ['Pause simulated search', 'paused'], ['Fail simulated search', 'error']]) {
+          const button = document.createElement('button'); button.textContent = label
+          button.onclick = () => {
+            const found = kind === 'found' ? firstMatch(args.identityKey, args.minimumStage, args.network, 10000n) : null
+            if (kind === 'found' && !found) throw new Error('Synthetic worker fixture has no eligible address')
+            send({ kind, ...found, stage: args.minimumStage, next: '100', message: 'Synthetic search error' })
+          }
+          this.controls.push(button); counter.append(button)
+        }
+      })
+    }
+  }
+}
 const create = wallet.createAction.bind(wallet)
 let actions = 0
-wallet.createAction = async args => { counter.textContent = `Isolated fixture · ${++actions} wallet transactions`; return create(args) }
+let submissions = 0
+window.fixtureSubmissionCount = () => submissions
+window.fixtureSetNetwork = network => { wallet.getNetwork = async () => ({ network }) }
+window.fixtureBlockCopyReads = () => {
+  const blocked = async () => { throw new Error('Copy triggered a wallet or chain read') }
+  wallet.getPublicKey = wallet.getNetwork = wallet.listOutputs = wallet.listActions = blocked
+  window.fetch = blocked
+}
+wallet.createAction = async args => {
+  counter.textContent = `Isolated demo · no real funds · ${++actions} simulated actions`
+  if (args.options?.sendWith && new URL(location.href).searchParams.has('hold-submit')) {
+    await new Promise(resolve => {
+      const finish = document.createElement('button'); finish.textContent = 'Complete simulated payment'
+      finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+    })
+  }
+  const result = await create(args)
+  if (args.options?.sendWith) {
+    submissions++
+    const mode = new URL(location.href).searchParams.get('submit')
+    if (mode === 'missing') { wallet.state.actions.length = 0; throw new Error('Synthetic unknown submission') }
+    if (mode === 'accepted-lost') throw new Error('Synthetic reply lost after wallet acceptance')
+    if (mode === 'failed') { wallet.state.actions.at(-1).status = 'failed'; return { sendWithResults: args.options.sendWith.map(txid => ({ txid, status: 'failed' })) } }
+    if (new URL(location.href).searchParams.has('block-after-accept')) {
+      wallet.listOutputs = async () => { throw new Error('Accepted payment triggered an unnecessary recovery read') }
+      window.fetch = async () => { throw new Error('Accepted payment triggered an unnecessary chain read') }
+    }
+  }
+  return result
+}
+let holdRefresh = new URL(location.href).searchParams.has('hold-refresh') ? 'payments' : null
+let refreshReads = 0
+window.fixtureRefreshReads = () => refreshReads
+window.fixtureHoldNextRefresh = kind => { holdRefresh = kind }
+const pauseRefresh = async kind => {
+  if (holdRefresh !== kind) return
+  holdRefresh = null
+  await new Promise(resolve => {
+    const finish = document.createElement('button'); finish.textContent = 'Complete simulated refresh'
+    finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+  })
+}
 window.fetch = async (input) => {
   const url = String(input)
+  if (url.includes('/unspent/all')) {
+    refreshReads++; await pauseRefresh('payments')
+    if (new URL(location.href).searchParams.has('refresh-error')) return new Response('', { status: 400 })
+  }
+  if (url.includes('/chain/info')) await pauseRefresh('addresses')
   const headerHeight = Number(url.match(/\/block\/(\d+)\/header$/)?.[1])
   if (paymentRoots.has(headerHeight)) return Response.json({ merkleroot: paymentRoots.get(headerHeight) })
   if (url.endsWith('/spent')) return new Response('', { status: 404 })
@@ -44,6 +133,26 @@ if (new URL(location.href).searchParams.has('payments')) {
     paymentRoots.set(height, txid); wallet.state.transactions.set(txid, tx)
     const coin = { txid, vout: 0, satoshis: index ? 10000 : 10002, keyID, address, height }
     wallet.state.outputs.set(`${txid}.0`, { basket: COIN_BASKET, tags: [], satoshis: coin.satoshis, spendable: true, customInstructions: JSON.stringify({ v: 1, network: 'mainnet', ...coin }) })
+  }
+}
+const pendingStatus = new URL(location.href).searchParams.get('pending')
+if (pendingStatus) {
+  const pending = { txid: 'a'.repeat(64), status: pendingStatus, satoshis: 0, isOutgoing: true, version: 1, lockTime: 0, labels: ['mountaintops actions v1'], description: 'Synthetic payment waiting for wallet status' }
+  wallet.state.actions.push(pending)
+  const abort = wallet.abortAction.bind(wallet)
+  let aborts = 0
+  window.fixtureAbortCalls = () => aborts
+  wallet.abortAction = async args => {
+    await pauseWalletCall('abortAction')
+    aborts++
+    if (args.reference === pending.txid && pending.status === 'nosend') { pending.status = 'failed'; return { aborted: true } }
+    return abort(args)
+  }
+  window.fixtureSetStatus = status => { pending.status = status }
+  window.fixtureAddConflict = () => { wallet.state.actions.push({ ...pending, status: 'failed' }) }
+  window.fixtureBlockRecoveryReads = () => {
+    wallet.listOutputs = async () => { throw new Error('Status refresh accessed wallet records') }
+    window.fetch = async () => { throw new Error('Status refresh accessed chain coverage') }
   }
 }
 await import('../src/main.tsx')

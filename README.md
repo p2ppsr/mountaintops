@@ -22,7 +22,7 @@ Coin evidence and per-input derivation metadata are retained in the `mountaintop
 
 `shared/schedule.json` pins the normative schedule at BRC document blob `85eaa6219cec77350170d52d243e65122e453d39` ([merged proposal](https://github.com/bsv-blockchain/BRCs/blob/068e4b5eac90ebbe726fb067682bf72aadafa4ff/opinions/0234.md)). Mainnet block 1,000,000 establishes the MTP anchor. Receive cards show **Not earlier than [month year]**, an estimated earliest expiration at the first stage the address fails, including the 14-chain-day waiting round. Before the anchor exists, its median time is projected from a validated WoC tip height/hash/MTP at 600 seconds per block; these projections can move earlier or later and are explicitly estimates, not guaranteed minimum dates. Once available, the actual anchor replaces the projection. A More info modal explains the stage number, ownership, transaction eligibility, approximate stage blocks/dates and links to BRC-234. Missing optional tip evidence shows an unavailable estimate without changing stage-0 coverage. Testnet and final-stage addresses have no invented cutoff. Estimated dates/heights never drive expiration, receiving eligibility or mining. Calendar gates alone are not expiration dates: all-version non-coinbase volume, frozen pending rounds, the 14-MTP-day notice and following-block activation also apply. Coverage is replayed from parent-linked WoC block evidence and wallet checkpoints; reorged checkpoints are discarded. Initial catch-up after the anchor can be lengthy. Testnet has no fabricated mainnet sunset.
 
-Address, TXID and script-hash predicates are independent. The app displays funding coverage at confirmation without discarding coins outside those rules. Payments/imports prepare version-1 transactions with supported wallet APIs, bounded nonce variation, `noSend` signing, final-template and final-TXID inspection, fresh coverage checks, and one explicit `sendWith` submission. Every input, including wallet-added fee/change inputs, is checked against known-outpoint spend evidence before signing and again immediately before submission. A spent or unknown input stops the payment and aborts its unsubmitted preparation. A signature or wallet balance alone does not prove spendability. The same checks protect encrypted record saves: LocalKVStore prepares and signs without broadcasting, its SDK validates the token/template, then the app checks all inputs again before one explicit release. Unsubmitted record actions recover through native wallet labels; ordinary acknowledged unproven records do not block payments, while unresolved preparations do. Candidate payment outputs are never changed to grind. Abandoned candidates are aborted. The wallet may ask for permissions; metadata records have their own fees. The payment work budget is 30 seconds; a match at broadcast remains provisional until confirmation.
+Address, TXID and script-hash predicates are independent. The app displays funding coverage at confirmation without discarding coins outside those rules. Payments/imports prepare version-1 transactions with supported wallet APIs, bounded nonce variation, `noSend` signing, final-template and final-TXID inspection, fresh coverage checks, and one explicit `sendWith` submission. Every input, including wallet-added fee/change inputs, is checked against known-outpoint spend evidence before signing and again immediately before submission. A spent or unknown input stops the payment and aborts its unsubmitted preparation. A signature or wallet balance alone does not prove spendability. The same checks protect encrypted record saves: LocalKVStore prepares and signs without broadcasting, its SDK validates the token/template, then the app checks all inputs again before one explicit release. Unsubmitted record actions recover through native wallet labels; ordinary acknowledged unproven records do not block payments, while unresolved preparations do. Candidate payment outputs are never changed to grind. Abandoned candidates are aborted. The wallet may ask for permissions; metadata records have their own fees. The payment work budget is 30 seconds. Coverage at inclusion remains a chain-derived fact, independent of application completion on wallet acceptance.
 
 Native durable wallet action history and unique labels support recovery after an interrupted submission, without requiring an extra fee-paying record before the first import. An empty wallet can import its first coins. Signed noSend preparations can be canceled by TXID from a fresh device; unsigned or uncertain actions require wallet review. An uncertain outcome blocks automatic retries and requires checking wallet history. Out-of-session signable-reference recovery is not assumed. Mountaintops does not promise that a BRC-234 merge proves provider adoption, indefinite WoC availability, complete retrieval of data a provider no longer serves, or external wallet transaction-grinding support. Such failures remain explicit, with retained funds and keys intact.
 
@@ -67,3 +67,54 @@ After publishing addresses, rollback must preserve this wallet record format, ex
 New actions use fixed labels and native TXIDs, avoiding a new label permission for every request. Older UUID-labelled actions remain recoverable by reading the common app label and matching their TXID or legacy label in returned metadata. No transaction UI history is persisted.
 
 The header and favicon use the same authored `/mountaintops.svg`. Wallet/PWA icons and the touch icon are PNG renders of that source at 192 and 512 pixels. Keep all variants in sync when changing the logo. The unused legacy Vite file remains only for cached old HTML during compatible releases; the current app and manifest never reference it.
+
+## Action feedback and payment outcomes
+
+Every asynchronous action shows an active button and a clear status: connection,
+copy, send/move, payment/address refresh, search preparation and mining, saving an
+address or search progress, unfinished-payment review/cancellation, and background
+address checks. Progress ends on success or error; existing balances stay visible
+through a refresh. Reduced-motion preferences stop decorative animation, and a
+live announcement outside the busy region keeps status available to screen
+readers. Switching a saved address, reviewing a draft, opening details and other
+instant actions do not add artificial loading delays.
+
+Copy starts directly in the focused click using the currently validated address,
+without waiting for wallet or chain calls. Receiving, network, retirement and
+pending-expiration guards still apply. Coverage older than 90 seconds requires a
+separate address check and a new explicit Copy click; the app never writes the
+clipboard later in the background. Browser denial selects the address for manual
+copying instead of displaying a raw clipboard error.
+
+Sending reviews an exact recipient/amount snapshot before wallet preparation.
+Sats and BSV conversion preserves the recipient amount. Exactly one positive
+submission acknowledgment must match the signed TXID. Wallet `sending`,
+`unproven` and `completed` states acknowledge wallet ownership of the transaction
+lifecycle and release the app payment hold. Mining, proof collection and broadcast
+retries belong to the wallet. No post-acceptance metadata or chain read can turn
+a successful acknowledgment into a failed payment or delay its receipt.
+
+Genuine unknown, incomplete or contradictory outcomes retain the exact-attempt
+guard. Checking status reads only identity, network and native action history;
+it never signs, resubmits, refreshes recovery records or writes a status token.
+A previously observed unresolved action missing from later history remains
+guarded in that session. Legacy action records resolve in memory. Unsent
+preparations keep their separate cancellation action, checked against fresh
+history before aborting. Known failure is never success or an automatic retry.
+Input, template, coverage, expiry, ownership and recovery checks remain unchanged.
+
+Validation from `frontend/`: `npm test`, `npm run lint`, `npm run build`, and
+`npm run test:browser`. Disposable SDK/browser checks at 1440, 390 and 320 pixels
+cover all action states, delayed/declined/lost wallet results, single submission,
+subsequent unmined-change payments, account boundaries, preserved balances,
+clipboard focus/denial, and reduced motion. They block external requests and do
+not use a real wallet. `ACTIONS_EVIDENCE`, `COPY_ADDRESS_EVIDENCE`,
+`REFRESH_EVIDENCE` and `PAYMENT_STATUS_EVIDENCE` optionally save demo screenshots.
+The status API supplies no submission timestamp; the UI reports the observed
+check time instead of inventing elapsed submission time or a mining countdown.
+
+CI exports a committed Linux/amd64 qualification image for isolated startup and
+endpoint-withdrawal testing. Its non-root runtime and port 8080 match production
+constraints. Production releases retain the immutable old-HTML asset bridge,
+existing CARS security/availability fields and wallet record compatibility.
+Rollback must preserve wallet data and earlier assets.

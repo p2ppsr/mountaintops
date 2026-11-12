@@ -62,6 +62,8 @@ export class FixtureWallet extends ProtoWallet {
     this.state.transactions.set(txid, tx)
     tx.outputs.forEach((out, index) => {
       const original = args.outputs?.[index]
+      // External recipient outputs do not become this wallet's funding coins.
+      if (!original?.basket && out.lockingScript.toHex() !== new P2PKH().lock(this.key.toPublicKey().toAddress()).toHex()) return
       this.state.outputs.set(`${txid}.${index}`, { basket: original?.basket ?? 'default', tags: original?.tags ?? [], satoshis: out.satoshis, customInstructions: original?.customInstructions, spendable: true })
     })
     this.state.actions.push({ txid, satoshis: -2, isOutgoing: true, version: tx.version, lockTime: tx.lockTime, status: options?.noSend ? 'nosend' : 'unproven', labels: args.labels ?? [], description: args.description })

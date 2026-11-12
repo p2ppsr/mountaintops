@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { P2PKH, PrivateKey, Transaction, Spend } from '@bsv/sdk'
-import { assertSameTemplate, importCoins, sendCoins, unfinishedWalletActions } from '../src/actions.ts'
+import { assertSameTemplate, importCoins, sendCoins, unfinishedWalletActions, PaymentOutcomeUnknownError } from '../src/actions.ts'
 import Importer from '../src/Importer.ts'
 import { FixtureWallet } from './fixtureWallet.mjs'
 
@@ -56,6 +56,69 @@ test('unsigned preparation and withheld signing precede one explicit sendWith', 
     assert.deepEqual(phases, ['prepare', 'sign', 'submit'])
     assert.equal(wallet.state.actions.at(-1).status, 'unproven')
     assert.equal(records.length, 0)
+  } finally { globalThis.fetch = previous }
+})
+
+test('two deliberate payments can spend valid wallet change before either payment is mined', async () => {
+  const previous = globalThis.fetch
+  globalThis.fetch = async url => String(url).endsWith('/spent') ? new Response('', { status: 404 }) : Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  const wallet = new FixtureWallet(), store = { network: 'mainnet', load: async () => [] }
+  const submissions = [], create = wallet.createAction.bind(wallet)
+  wallet.createAction = async args => { if (args.options?.sendWith) submissions.push(...args.options.sendWith); return create(args) }
+  try {
+    const first = await sendCoins(wallet, store, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {})
+    const second = await sendCoins(wallet, store, new PrivateKey(44).toPublicKey().toAddress(), '0.00000500', { stage: 0, state: null }, () => {})
+    assert.notEqual(first, second)
+    assert.deepEqual(submissions, [first, second])
+    assert.ok(wallet.state.actions.every(action => action.status === 'unproven'))
+    assert.deepEqual(await unfinishedWalletActions(wallet, 'mainnet'), [])
+    const next = wallet.state.transactions.get(second)
+    assert.equal(next.inputs[0].sourceTXID, first)
+    assert.equal(next.inputs[0].sourceOutputIndex, 1, 'the next payment spends owned change, not the external recipient output')
+    for (const txid of submissions) {
+      const tx = wallet.state.transactions.get(txid), input = tx.inputs[0], source = input.sourceTransaction.outputs[input.sourceOutputIndex]
+      const spend = new Spend({ sourceTXID: input.sourceTXID, sourceOutputIndex: input.sourceOutputIndex, sourceSatoshis: source.satoshis, lockingScript: source.lockingScript, transactionVersion: tx.version, otherInputs: [], inputIndex: 0, inputSequence: input.sequence, unlockingScript: input.unlockingScript, outputs: tx.outputs, lockTime: tx.lockTime })
+      assert.equal(spend.validate(), true)
+    }
+  } finally { globalThis.fetch = previous }
+})
+
+test('a lost submission reply carries its exact TXID and never retries or aborts a released payment', async () => {
+  const previous = globalThis.fetch
+  globalThis.fetch = async url => String(url).endsWith('/spent') ? new Response('', { status: 404 }) : Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  const wallet = new FixtureWallet(), create = wallet.createAction.bind(wallet)
+  let submitted, calls = 0, aborts = 0
+  wallet.createAction = async args => {
+    const result = await create(args)
+    if (args.options?.sendWith) { calls++; submitted = args.options.sendWith[0]; throw new Error('Synthetic reply lost after acceptance') }
+    return result
+  }
+  wallet.abortAction = async () => { aborts++; return { aborted: true } }
+  try {
+    await assert.rejects(sendCoins(wallet, { network: 'mainnet', load: async () => [] }, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {}), error => error instanceof PaymentOutcomeUnknownError && error.txid === submitted)
+    assert.equal(calls, 1); assert.equal(aborts, 0)
+    assert.equal(wallet.state.actions.at(-1).status, 'unproven')
+  } finally { globalThis.fetch = previous }
+})
+
+test('missing, mismatched, failed and contradictory submission acknowledgments cannot become a success', async () => {
+  const previous = globalThis.fetch
+  globalThis.fetch = async url => String(url).endsWith('/spent') ? new Response('', { status: 404 }) : Response.json({ blocks: 972777, bestblockhash: 'a'.repeat(64) })
+  try {
+    for (const mode of ['missing', 'mismatched', 'failed', 'contradictory']) {
+      const wallet = new FixtureWallet(), create = wallet.createAction.bind(wallet)
+      let submissions = 0, aborts = 0, submitted
+      wallet.createAction = async args => {
+        const result = await create(args)
+        if (!args.options?.sendWith) return result
+        submissions++; submitted = args.options.sendWith[0]
+        const accepted = { txid: submitted, status: 'unproven' }
+        return { ...result, sendWithResults: mode === 'missing' ? [] : mode === 'mismatched' ? [{ ...accepted, txid: 'f'.repeat(64) }] : mode === 'failed' ? [{ ...accepted, status: 'failed' }] : [accepted, { ...accepted, status: 'failed' }] }
+      }
+      wallet.abortAction = async () => { aborts++; return { aborted: true } }
+      await assert.rejects(sendCoins(wallet, { network: 'mainnet', load: async () => [] }, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {}), error => error instanceof PaymentOutcomeUnknownError && error.txid === submitted, mode)
+      assert.equal(submissions, 1, mode); assert.equal(aborts, 0, mode)
+    }
   } finally { globalThis.fetch = previous }
 })
 
@@ -123,13 +186,13 @@ test('a fresh wallet instance finds a signed unsubmitted action without browser 
 })
 
 
-test('fresh-device recovery blocks another payment while a submission is sending or unproven', async () => {
-  for (const status of ['sending', 'unproven']) {
+test('fresh-device recovery blocks only unsent or unresolved wallet actions', async () => {
+  for (const status of ['unsigned', 'nosend', 'unprocessed', 'nonfinal', 'future-state']) {
     const wallet = new FixtureWallet()
     wallet.state.actions.push({ txid: 'a'.repeat(64), status, labels: ['mountaintops actions v1', 'mountaintops request uncertain'], description: 'Awaiting wallet outcome' })
     const pending = await unfinishedWalletActions(new FixtureWallet(wallet.state), 'mainnet')
     assert.equal(pending.length, 1)
-    assert.equal(pending[0].data.state, 'needs wallet review')
+    assert.equal(pending[0].data.state, status === 'nosend' ? 'prepared' : 'needs wallet review')
     await assert.rejects(sendCoins(wallet, { network: 'mainnet' }, new PrivateKey(43).toPublicKey().toAddress(), '0.00000001', { stage: 0 }, () => {}), /unfinished wallet action/)
   }
 })

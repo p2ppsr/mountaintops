@@ -22,4 +22,27 @@ jobs:
       - run: npm run test
       - run: npm run lint
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
       - run: npm audit --omit=dev --audit-level=moderate
+  qualification-image:
+    needs: client
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build committed Linux qualification image
+        run: |
+          docker build --platform linux/amd64 --build-arg SOURCE_REVISION="$SOURCE_SHA" -f ops/canary.Dockerfile -t "mountaintops-qualification:$SOURCE_SHA" .
+          docker image inspect "mountaintops-qualification:$SOURCE_SHA" --format '{{.Id}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}}' > qualification-image.txt
+          docker save "mountaintops-qualification:$SOURCE_SHA" | gzip > qualification-image.tar.gz
+          sha256sum qualification-image.tar.gz > qualification-image.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mountaintops-qualification-${{ github.event.pull_request.head.sha || github.sha }}
+          path: qualification-image.*
+          retention-days: 1
+          compression-level: 0

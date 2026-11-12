@@ -6,7 +6,7 @@ import { WalletPermissionsManager } from '@bsv/wallet-toolbox-client'
 import { FixtureWallet } from './fixtureWallet.mjs'
 import { WalletRecords } from '../src/walletRecords.ts'
 import { sendCoins } from '../src/actions.ts'
-import { assertWalletActionFinal, unfinishedWalletActions } from '../src/walletActionState.ts'
+import { assertWalletActionResolved, unfinishedWalletActions } from '../src/walletActionState.ts'
 import { ACTION_LABEL, RECORD_LABEL, RECEIPT_LABEL } from '../src/walletScopes.ts'
 import { publicDeriver } from '../src/derivation.ts'
 
@@ -71,8 +71,8 @@ test('real SDK encrypted save, fresh recovery, derivation and payment use only d
     assert.equal((await restored.load()).length, 1)
     await wallet.listOutputs({ basket: 'mountaintops receipts v1' })
     const txid = await sendCoins(wallet, store, new PrivateKey(43).toPublicKey().toAddress(), '0.00001000', { stage: 0, state: null }, () => {})
-    const pending = await unfinishedWalletActions(wallet, 'mainnet')
-    assert.equal(pending[0].data.id, txid)
+    assert.deepEqual(await unfinishedWalletActions(wallet, 'mainnet'), [])
+    await assertWalletActionResolved(wallet, { txid })
     assert.deepEqual(raw.state.actions.at(-1).labels, [ACTION_LABEL])
     assert.deepEqual(raw.state.actions[0].labels, [ACTION_LABEL, RECORD_LABEL])
   } finally { globalThis.fetch = previous }
@@ -124,10 +124,10 @@ test('legacy and new pending actions resolve using one fixed label across pages'
     assert.deepEqual(args.labels, [ACTION_LABEL])
     return { totalActions: actions.length, actions: actions.slice(args.offset, args.offset + args.limit) }
   } }
-  await assertWalletActionFinal(wallet, { id: 'old-request' })
-  await assertWalletActionFinal(wallet, { txid: actions[100].txid })
+  await assertWalletActionResolved(wallet, { id: 'old-request' })
+  await assertWalletActionResolved(wallet, { txid: actions[100].txid })
   actions[100].status = 'unproven'
-  await assert.rejects(assertWalletActionFinal(wallet, { id: 'old-request' }), /no final result/)
-  await assert.rejects(assertWalletActionFinal(wallet, { txid: 'f'.repeat(64) }), /no final result/)
+  await assertWalletActionResolved(wallet, { id: 'old-request' })
+  await assert.rejects(assertWalletActionResolved(wallet, { txid: 'f'.repeat(64) }), /outcome is not known/)
   await assert.rejects(unfinishedWalletActions({ listActions: async () => ({ totalActions: 200, actions: [] }) }, 'mainnet'), /incomplete/)
 })

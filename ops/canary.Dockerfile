@@ -6,9 +6,9 @@ RUN cd frontend && npm ci
 COPY frontend ./frontend
 COPY shared ./shared
 RUN cd frontend && npm run build
-FROM docker.io/nginx:alpine
+FROM docker.io/nginxinc/nginx-unprivileged:alpine
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.source="https://github.com/p2ppsr/mountaintops" org.opencontainers.image.revision="$SOURCE_REVISION"
 COPY ops/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/frontend/build /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 8080
