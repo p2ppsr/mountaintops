@@ -8,10 +8,28 @@ const wallet = new FixtureWallet()
 const paymentRoots = new Map()
 let savedAddress
 window.CWI = wallet
-const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated fixture · 0 wallet transactions'; document.body.prepend(counter)
+const counter = document.createElement('output'); counter.id = 'fixture-actions'; counter.style.cssText = 'display:block;text-align:center;padding:8px'; counter.textContent = 'Isolated demo · no real funds · 0 simulated actions'; document.body.prepend(counter)
 const create = wallet.createAction.bind(wallet)
 let actions = 0
-wallet.createAction = async args => { counter.textContent = `Isolated fixture · ${++actions} wallet transactions`; return create(args) }
+let submissions = 0
+window.fixtureSubmissionCount = () => submissions
+window.fixtureSetNetwork = network => { wallet.getNetwork = async () => ({ network }) }
+wallet.createAction = async args => {
+  counter.textContent = `Isolated demo · no real funds · ${++actions} simulated actions`
+  const result = await create(args)
+  if (args.options?.sendWith) {
+    submissions++
+    const mode = new URL(location.href).searchParams.get('submit')
+    if (mode === 'missing') { wallet.state.actions.length = 0; throw new Error('Synthetic unknown submission') }
+    if (mode === 'accepted-lost') throw new Error('Synthetic reply lost after wallet acceptance')
+    if (mode === 'failed') { wallet.state.actions.at(-1).status = 'failed'; return { sendWithResults: args.options.sendWith.map(txid => ({ txid, status: 'failed' })) } }
+    if (new URL(location.href).searchParams.has('block-after-accept')) {
+      wallet.listOutputs = async () => { throw new Error('Accepted payment triggered an unnecessary recovery read') }
+      window.fetch = async () => { throw new Error('Accepted payment triggered an unnecessary chain read') }
+    }
+  }
+  return result
+}
 window.fetch = async (input) => {
   const url = String(input)
   const headerHeight = Number(url.match(/\/block\/(\d+)\/header$/)?.[1])

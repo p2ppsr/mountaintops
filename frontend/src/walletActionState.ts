@@ -1,6 +1,11 @@
 import type { WalletAction, WalletInterface } from '@bsv/sdk'
 import type { RecoveryRecord, WalletRecords } from './walletRecords.ts'
-import { ACTION_LABEL, RECORD_LABEL } from './walletScopes.ts'
+import { ACTION_LABEL } from './walletScopes.ts'
+
+// These states acknowledge that the wallet owns the transaction lifecycle.
+// Mining, proof collection and broadcast retries belong to that wallet.
+const acceptedStatuses = new Set(['sending', 'unproven', 'completed'])
+export type PaymentOutcome = 'accepted' | 'failed' | 'unknown'
 
 async function walletActions(wallet: WalletInterface) {
   const actions = []
@@ -18,28 +23,30 @@ function matches(action: Record<string, unknown>, row: WalletAction): boolean {
     : typeof action.id === 'string' && Boolean(row.labels?.includes(`mountaintops request ${action.id}`))
 }
 
-function statusFromActions(actions: WalletAction[], action: Record<string, unknown>): 'completed' | 'failed' | 'unproven' | 'unknown' {
-  const matching = actions.filter(row => matches(action, row))
-  const statuses = new Set(matching.map(row => row.status))
-  if (statuses.size !== 1) return 'unknown'
-  const status = matching[0]?.status
-  return status === 'completed' || status === 'failed' || status === 'unproven' ? status : 'unknown'
+function outcomeFromRows(rows: WalletAction[]): PaymentOutcome {
+  if (!rows.length) return 'unknown'
+  if (rows.every(row => acceptedStatuses.has(row.status))) return 'accepted'
+  if (rows.every(row => row.status === 'failed')) return 'failed'
+  return 'unknown'
 }
 
-export async function walletActionStatus(wallet: WalletInterface, action: Record<string, unknown>): Promise<'completed' | 'failed' | 'unproven' | 'unknown'> {
+function statusFromActions(actions: WalletAction[], action: Record<string, unknown>): PaymentOutcome {
+  return outcomeFromRows(actions.filter(row => matches(action, row)))
+}
+
+export async function walletActionStatus(wallet: WalletInterface, action: Record<string, unknown>): Promise<PaymentOutcome> {
   return statusFromActions(await walletActions(wallet), action)
 }
 
 export function walletStatusMessage(status: Awaited<ReturnType<typeof walletActionStatus>>): string {
-  if (status === 'completed') return 'Payment confirmed by your wallet.'
+  if (status === 'accepted') return 'Your wallet accepted this payment.'
   if (status === 'failed') return 'Your wallet reports this payment failed. Review wallet activity before starting another payment.'
-  if (status === 'unproven') return 'Submitted; waiting for confirmation. Your wallet has not returned a mined proof yet. Do not send this payment again.'
   return 'The payment outcome is not known. Check wallet activity before continuing. Do not send it again.'
 }
 
-export async function assertWalletActionFinal(wallet: WalletInterface, action: Record<string, unknown>): Promise<void> {
+export async function assertWalletActionResolved(wallet: WalletInterface, action: Record<string, unknown>): Promise<void> {
   const status = await walletActionStatus(wallet, action)
-  if (status !== 'completed' && status !== 'failed') throw new Error(walletStatusMessage(status))
+  if (status === 'unknown') throw new Error(walletStatusMessage(status))
 }
 
 function pendingFromActions(actions: WalletAction[], network: WalletRecords['network']): RecoveryRecord[] {
@@ -52,11 +59,10 @@ function pendingFromActions(actions: WalletAction[], network: WalletRecords['net
   for (const [key, group] of groups) {
     const action = group[0], statuses = new Set(group.map(row => row.status))
     const consistent = statuses.size === 1
-    if (consistent && (action.status === 'completed' || action.status === 'failed')) continue
-    if (consistent && action.status === 'unproven' && group.every(row => row.labels?.includes(RECORD_LABEL))) continue
+    if (outcomeFromRows(group) !== 'unknown') continue
     const id = action.labels?.find(label => label.startsWith('mountaintops request '))?.slice(21) ?? (action.txid || key)
     const canAbort = consistent && action.status === 'nosend' && /^[a-f0-9]{64}$/.test(action.txid)
-    pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : consistent && action.status === 'unproven' ? 'awaiting confirmation' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
+    pending.push({ v: 1, network, kind: 'action', clock: 0, data: { id, state: canAbort ? 'prepared' : 'needs wallet review', reference: canAbort ? action.txid : null, txid: action.txid } })
   }
   return pending
 }
@@ -69,17 +75,15 @@ function reconcileActionRecords(actions: WalletAction[], network: WalletRecords[
     if (record.kind !== 'action') { carried.push(record); continue }
     if (resolved.has(String(record.data.state))) { if (record.clock > 0) carried.push(record); continue }
     const status = statusFromActions(actions, record.data)
-    const matching = actions.filter(row => matches(record.data, row))
-    const recordOnly = status === 'unproven' && matching.every(row => row.labels?.includes(RECORD_LABEL))
-    if (recordOnly || status === 'completed' || status === 'failed') {
+    if (status === 'accepted' || status === 'failed') {
       // Resolve a legacy record only in memory; refresh never writes a token.
       if (record.clock > 0) carried.push({ ...record, data: { ...record.data, state: 'reviewed in wallet' } })
       continue
     }
     if (native.some(item => item.data.id === record.data.id || (record.data.txid && item.data.txid === record.data.txid))) continue
     // A previously observed action disappearing from history is not proof that
-    // it failed. Keep the resend guard until the wallet supplies a final result.
-    native.push({ ...record, data: { ...record.data, state: status === 'unproven' ? 'awaiting confirmation' : 'needs wallet review', reference: null } })
+    // it failed. Keep the guard until the wallet acknowledges its outcome.
+    native.push({ ...record, data: { ...record.data, state: 'needs wallet review', reference: null } })
   }
   return [...carried, ...native]
 }

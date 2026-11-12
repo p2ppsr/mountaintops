@@ -2,20 +2,23 @@ import { useEffect, useRef, useState } from 'react'
 import { PublicKey, WalletClient } from '@bsv/sdk'
 import { addressMatches, assertReceivable, coverageLabel, lastCoveredStage, stages, type AddressRecord, type Network } from '../../shared/brc234.ts'
 import { WalletRecords, type RecoveryRecord } from './walletRecords.ts'
-import { applyExpirations, bookFromRecords } from './addressBook.ts'
+import { applyExpirations, bookFromRecords, validateAddress } from './addressBook.ts'
 import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveUX.ts'
 import ReceiveInfo from './ReceiveInfo.tsx'
 import PaymentStatus from './PaymentStatus.tsx'
+import PaymentReceipt, { type PaymentReceiptData } from './PaymentReceipt.tsx'
+import PaymentReview, { type PaymentDraft } from './PaymentReview.tsx'
+import { bsvAmount, parseAmount, type AmountUnit } from './paymentAmount.ts'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { availableRetainedCoins, refreshCoins, type Coin } from './coins.ts'
-import { importCoins, sendCoins } from './actions.ts'
+import { importCoins, sendCoins, PaymentOutcomeUnknownError } from './actions.ts'
 import { preferCompatibleTransport } from './walletClient.ts'
 import { paymentActionRecords, refreshPaymentStatus, WalletAccountChangedError, walletStatusMessage } from './walletActionState.ts'
 import './style.css'
 
 const client = new WalletClient('auto')
 type Session = { identity: string; network: Network; store: WalletRecords; book: AddressRecord[]; records: RecoveryRecord[]; coverage: Coverage; primary: string | null; receivingBlocked: string | null }
-const money = (satoshis: number) => `${Math.floor(satoshis / 100_000_000)}.${String(satoshis % 100_000_000).padStart(8, '0')} BSV`
+const money = (satoshis: number) => `${bsvAmount(satoshis)} BSV`
 
 function unresolvedActions(records: RecoveryRecord[]) {
   const actions = new Map<string, Record<string, unknown>>()
@@ -37,8 +40,10 @@ export default function Mountaintops() {
   const [pausedSearch, setPausedSearch] = useState<{ stage: number; next: string } | null>(null)
   const [recipient, setRecipient] = useState('')
   const [amount, setAmount] = useState('')
-  const [txid, setTxid] = useState('')
-  const [history, setHistory] = useState<{ txid: string; description: string; status: string }[]>([])
+  const [unit, setUnit] = useState<AmountUnit>('sats')
+  const [review, setReview] = useState<PaymentDraft | null>(null)
+  const [receipt, setReceipt] = useState<PaymentReceiptData | null>(null)
+  const [history, setHistory] = useState<PaymentReceiptData[]>([])
   const [searching, setSearching] = useState(false)
   const [info, setInfo] = useState<{ stage: number; expired: boolean } | null>(null)
   const worker = useRef<Worker | null>(null)
@@ -57,7 +62,7 @@ export default function Mountaintops() {
   }
 
   const clearWalletSession = () => {
-    setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setTxid('')
+    setSession(null); setBalances({}); setCheckedPayments({}); setCandidate(null); setPausedSearch(null); setHistory([]); setReceipt(null); setReview(null); setRecipient(''); setAmount('')
   }
 
   const reload = async (previous: Session | null = current.current): Promise<Session> => {
@@ -66,7 +71,7 @@ export default function Mountaintops() {
     const { publicKey: identity } = await client.getPublicKey({ identityKey: true })
     if (previous && (previous.identity !== identity || previous.network !== network)) {
       clearWalletSession()
-      throw new Error('Wallet account or network changed. Connect again to load its own records.')
+      throw new WalletAccountChangedError()
     }
     const store = previous?.store ?? new WalletRecords(client, identity, network)
     let records = await store.load()
@@ -195,28 +200,49 @@ export default function Mountaintops() {
     }
     await reload(fresh); setMessage('Payments checked.')
   })
+  const finishPayment = async (fresh: Session, task: () => Promise<string>, details: Omit<PaymentReceiptData, 'txid'>, onAccepted: () => void) => {
+    let submitted: string
+    try { submitted = await task() } catch (error) {
+      if (!(error instanceof PaymentOutcomeUnknownError)) throw error
+      const guard: RecoveryRecord = { v: 1, kind: 'action', clock: 0, network: fresh.network, data: { id: error.txid, txid: error.txid, state: 'needs wallet review', reference: null } }
+      setSession(previous => previous && previous.identity === fresh.identity && previous.network === fresh.network ? { ...previous, records: [...previous.records.filter(record => record.kind !== 'action' || record.data.txid !== error.txid), guard] } : previous)
+      setReceipt(null); setReview(null); setRecipient(''); setAmount(''); setError(''); setMessage('')
+      return
+    }
+    const payment = { ...details, txid: submitted }
+    setReceipt(payment); setHistory(items => [payment, ...items]); setReview(null); setRecipient(''); setAmount(''); setMessage('')
+    onAccepted()
+    // The wallet acknowledged this transaction. Do not turn a later chain or
+    // metadata read into a payment failure, or wait for the wallet's mined proof.
+  }
+
   const importMoney = (keyID: string) => void run(async () => {
     const fresh = await reload()
     if (unresolvedActions(fresh.records).length) throw new Error('Review the unfinished wallet action before another payment.')
     const entry = fresh.book.find(x => x.keyID === keyID)!
     const coins = await refreshCoins(client, fresh.store, entry, fresh.coverage, setMessage)
-    const submitted = await importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage)
-    setCheckedPayments(x => ({ ...x, [keyID]: false }))
-    setTxid(submitted); setHistory(x => [{ txid: submitted, description: 'Import to wallet', status: 'Submitted' }, ...x]); setBalances(x => ({ ...x, [keyID]: undefined }))
-    const next = await reload(fresh)
-    setMessage(unresolvedActions(next.records).length ? '' : 'Transfer submitted.')
+    await finishPayment(fresh, () => importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage), { kind: 'move' }, () => {
+      setBalances(values => ({ ...values, [keyID]: (values[keyID] ?? []).filter(coin => !coins.some(spent => spent.txid === coin.txid && spent.vout === coin.vout)) }))
+    })
   })
+  const reviewPayment = () => {
+    if (!session || disabled || unresolvedActions(session.records).length) return
+    try {
+      const destination = recipient.trim()
+      validateAddress(destination, session.network)
+      const satoshis = parseAmount(amount, unit)
+      setReview({ recipient: destination, satoshis }); setReceipt(null); setError(''); setMessage('')
+    } catch (error) { setError(error instanceof Error ? error.message : 'Check the recipient and amount.'); setMessage('') }
+  }
   const send = () => void run(async () => {
+    if (!review) throw new Error('Review the recipient and amount before sending.')
+    const intent = review
     const fresh = await reload()
     if (unresolvedActions(fresh.records).length) throw new Error('Review the unfinished wallet action before another payment.')
     if (fresh.receivingBlocked) throw new Error(fresh.receivingBlocked)
-    const own = fresh.book.find(x => x.address === recipient)
+    const own = fresh.book.find(x => x.address === intent.recipient)
     if (own) assertReceivable(own, fresh.coverage.stage)
-    const submitted = await sendCoins(client, fresh.store, recipient, amount, fresh.coverage, setMessage)
-    setTxid(submitted); setHistory(x => [{ txid: submitted, description: `Send ${amount} BSV`, status: 'Submitted' }, ...x])
-    setRecipient(''); setAmount('')
-    const next = await reload(fresh)
-    setMessage(unresolvedActions(next.records).length ? '' : 'Payment sent.')
+    await finishPayment(fresh, () => sendCoins(client, fresh.store, intent.recipient, bsvAmount(intent.satoshis), fresh.coverage, setMessage), { ...intent, kind: 'send' }, () => {})
   })
 
   const disabled = busy || searching
@@ -224,9 +250,7 @@ export default function Mountaintops() {
   const primary = session?.book.find(x => x.keyID === session.primary)
   const suggestedEntry = !candidate && !pausedSearch && !searching && session?.book.filter(x => !x.retiredAt && lastCoveredStage(x.address) > (primary ? lastCoveredStage(primary.address) : -1)).sort((a, b) => lastCoveredStage(b.address) - lastCoveredStage(a.address))[0]
   const pendingActions = session ? unresolvedActions(session.records) : []
-  const paymentHold = pendingActions.length ? pendingActions.every(action => action.state === 'awaiting confirmation')
-    ? 'Transfers resume after confirmation.'
-    : 'Check payment status to continue.' : ''
+  const paymentHold = pendingActions.length ? 'Check your wallet to continue.' : ''
   const allPaymentsChecked = Boolean(session?.book.every(x => checkedPayments[x.keyID]))
   const checkedCount = session?.book.filter(x => checkedPayments[x.keyID]).length ?? 0
   const savedSearches = session ? [...new Map(session.records.filter(x => x.kind === 'search').map(x => [Number(x.data.stage), x.data])).values()]
@@ -273,12 +297,16 @@ export default function Mountaintops() {
             result = await refreshPaymentStatus(client, session.identity, session.network, result.records, action)
           }
           setSession({ ...session, records: result.records }); setStatusCheckedAt(Date.now())
-          setMessage(canceled ? 'Unsent payment canceled.' : unresolvedActions(result.records).length ? '' : walletStatusMessage(result.status))
+          if (!canceled && result.status === 'accepted' && typeof action.txid === 'string') {
+            setReceipt({ txid: action.txid, kind: 'recovered' }); setReview(null)
+          }
+          setMessage(canceled ? 'Unsent payment canceled.' : unresolvedActions(result.records).length || result.status === 'accepted' ? '' : walletStatusMessage(result.status))
         } catch (error) {
           if (error instanceof WalletAccountChangedError) clearWalletSession()
           throw error
         }
       }, true)} />
+      {receipt && <PaymentReceipt payment={receipt} onDone={() => { setReceipt(null); setView('receive') }} onAnother={() => { setReceipt(null); setReview(null); setView('send') }} />}
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
       {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
       {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
@@ -300,8 +328,23 @@ export default function Mountaintops() {
           </details>
         </div></details>
         <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Switching is free for this session. Reconnecting opens your longest-lasting eligible saved address.</p>{session.book.filter(x => x.keyID !== primary?.keyID).map(x => card(x))}<button className="secondary" disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Addresses and expiration checked.') })}>Refresh addresses</button></details>
-      </section> : <section className="send-panel"><h2>Send BSV</h2><p className="small">Public payment · wallet fees apply</p><label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="BSV address" autoComplete="off" spellCheck={false} /></label><label>Amount in BSV<input value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" /></label><button className="accent" disabled={disabled || pendingActions.length > 0 || !recipient || !amount} onClick={send}>Send BSV</button><p className="small">{paymentHold || 'Wallet approval is required. Expired receiving addresses are blocked.'}</p>{txid && !pendingActions.some(action => action.txid === txid) && <p className="transaction">Submitted: {txid}</p>}</section>}
-      <details className="activity"><summary>Activity this session <span className="count">{history.length}</span></summary><p className="small">Clears when you leave. Your wallet keeps its own payment records.</p>{!history.length && <p className="small">No payments yet.</p>}{history.map(x => <p className="transaction" key={x.txid}>{x.description} · {x.status}<br />{x.txid}</p>)}</details>
+      </section> : receipt ? null : review ? <PaymentReview payment={review} busy={disabled || pendingActions.length > 0} onBack={() => setReview(null)} onSend={send} /> : <section className="send-panel">
+        <h2>Send BSV</h2>
+        <form onSubmit={event => { event.preventDefault(); reviewPayment() }}>
+          <label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="Paste a BSV address" autoComplete="off" spellCheck={false} maxLength={80} /></label>
+          <label htmlFor="payment-amount">Amount</label>
+          <div className="amount-entry"><input id="payment-amount" value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} placeholder="0" inputMode={unit === 'sats' ? 'numeric' : 'decimal'} maxLength={32} /><select aria-label="Amount unit" value={unit} disabled={disabled} onChange={event => {
+            const next = event.target.value as AmountUnit
+            if (amount) {
+              try { const satoshis = parseAmount(amount, unit); setAmount(next === 'sats' ? String(satoshis) : bsvAmount(satoshis)) } catch { setAmount('') }
+            }
+            setUnit(next)
+          }}><option value="sats">sats</option><option value="BSV">BSV</option></select></div>
+          <button className="accent" type="submit" disabled={disabled || pendingActions.length > 0 || !recipient || !amount}>Review payment</button>
+          {paymentHold && <p className="small">{paymentHold}</p>}
+        </form>
+      </section>}
+      {history.length > 0 && <details className="activity"><summary>Recent activity <span className="count">{history.length}</span></summary><p className="small">This session only. Your wallet keeps the payment records.</p>{history.map(payment => <details className="activity-payment" key={payment.txid}><summary>{payment.kind === 'move' ? 'Moved to wallet' : 'Sent'}{payment.satoshis !== undefined ? ` · ${payment.satoshis.toLocaleString()} sats` : ''}</summary>{payment.recipient && <p className="small">To {payment.recipient}</p>}<p className="transaction">{payment.txid}</p></details>)}</details>}
     </>}
     {!session && error && <p className="error" role="alert">{error}</p>}
     <details className="help"><summary>Expiration, fees & recovery</summary><h3>When does my address expire?</h3><p>Each address shows a month-and-year estimate and the stage it meets. Choose More info for the schedule. Before block 1,000,000 arrives, estimates can move earlier or later. Low transaction volume can delay expiration.</p><p>When an address expires, stop using it everywhere. Mountaintops disables receiving and stops looking for new deposits. Earlier coins remain yours and can still be moved to your wallet.</p><h3>Can I recover on another device?</h3><p>Connect the same BRC-100 wallet account. Your saved addresses and coin evidence come from the wallet, without browser data or files from this device. Keep your wallet account and its recovery service available.</p><h3>What costs money?</h3><p>Searching and pausing are free. Saving a new address also makes it your receiving address in one encrypted 1-satoshi wallet record. Switching saved addresses is free for this session; reconnecting opens the longest-lasting eligible saved address. Saving search progress also needs a wallet record. Network and wallet service fees may apply to records. Moving or sending coins also incurs wallet fees.</p><h3>Does a longer-lasting address cover every payment?</h3><p>No. Funding TXID rules also apply, and from stage 13 the transaction must use version 1. Mountaintops prepares eligible transactions within a bounded work budget. External senders may create payments outside those rules. Eligibility never changes who owns the coins.</p><details><summary>Technical status</summary>{session && <p>{session.network} · checked through block {session.coverage.height.toLocaleString()} · stage {session.coverage.stage}</p>}<p>Client-only. Encrypted PushDrop recovery records use your BRC-100 wallet’s baskets. WhatsOnChain supplies chain data and historical recovery; unavailable or incomplete data cannot establish a balance.</p></details></details>

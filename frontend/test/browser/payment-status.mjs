@@ -3,6 +3,7 @@ import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { createServer } from 'vite'
 import { chromium } from 'playwright'
+
 const root = path.resolve(import.meta.dirname, '../..')
 const evidence = process.env.PAYMENT_STATUS_EVIDENCE
 if (evidence) await mkdir(evidence, { recursive: true })
@@ -10,6 +11,8 @@ const server = await createServer({ root, server: { host: '127.0.0.1', port: 0 }
 await server.listen()
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`
 const browser = await chromium.launch({ headless: true })
+const destination = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT'
+
 try {
   for (const width of [1440, 390, 320]) {
     const context = await browser.newContext({ viewport: { width, height: 1000 }, serviceWorkers: 'block' })
@@ -19,73 +22,123 @@ try {
       if (new URL(route.request().url()).origin === origin) return route.continue()
       unexpected.push(route.request().url()); return route.abort()
     })
-    try {
-      await page.goto(origin + '/test/ui.html?pending=unproven&payments')
+    const idle = () => page.waitForFunction(() => document.querySelector('main').getAttribute('aria-busy') === 'false')
+    const connect = async query => {
+      await page.goto(`${origin}/test/ui.html?${query}`)
       await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-      await page.waitForFunction(() => document.querySelector('main').getAttribute('aria-busy') === 'false')
-      const status = page.getByRole('region', { name: 'Wallet payment status' })
-      await status.getByRole('heading', { name: 'Payment sent', exact: true }).waitFor()
-      await status.getByText('Waiting for confirmation.', { exact: true }).waitFor()
-      assert.equal(await status.getAttribute('class'), 'payment-status sent')
-      await page.getByText('Received', { exact: true }).waitFor()
-      await page.getByText('10,002 sats', { exact: true }).waitFor()
-      await page.getByText('Transfers resume after confirmation.', { exact: true }).waitFor()
-      await status.getByText('Payment details', { exact: true }).click()
-      await status.getByText('Last checked', { exact: false }).waitFor()
-      await status.getByText('Payment details', { exact: true }).click()
-      if (evidence) await page.screenshot({ path: path.join(evidence, `received-${width}.png`), fullPage: true })
+      await idle()
+    }
+    const draft = async amount => {
+      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await page.getByLabel('To', { exact: true }).fill(destination)
+      await page.getByLabel('Amount', { exact: true }).fill(amount)
+      await page.getByRole('button', { name: 'Review payment', exact: true }).click()
+      await page.getByRole('region', { name: 'Review payment' }).waitFor()
+    }
+    const receipt = page.getByRole('status', { name: 'Payment receipt' })
+    const unresolved = page.getByRole('region', { name: 'Wallet payment status' })
+    const shot = async name => { if (evidence) await page.screenshot({ path: path.join(evidence, `${name}-${width}.png`), fullPage: true }) }
+    try {
+      // Existing accepted unmined funds are usable, without status polling.
+      await connect('pending=unproven&payments')
+      assert.equal(await unresolved.count(), 0)
+      assert.equal(await page.getByRole('button', { name: 'Move to wallet' }).isEnabled(), true)
+      assert.doesNotMatch(await page.locator('body').innerText(), /waiting for confirmation|resume after confirmation/i)
+      await shot('receive')
+      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await page.getByLabel('To', { exact: true }).fill(destination)
+      await page.getByLabel('Amount', { exact: true }).fill('1000')
+      await page.getByLabel('Amount unit').selectOption('BSV')
+      assert.equal(await page.getByLabel('Amount', { exact: true }).inputValue(), '0.00001000')
+      await page.getByLabel('Amount unit').selectOption('sats')
+      assert.equal(await page.getByLabel('Amount', { exact: true }).inputValue(), '1000')
+      await page.getByRole('button', { name: 'Review payment', exact: true }).click()
+      await page.getByRole('region', { name: 'Review payment' }).waitFor()
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
+      await shot('review')
+      await page.getByRole('button', { name: 'Back', exact: true }).click()
+      assert.equal(await page.getByLabel('Amount', { exact: true }).inputValue(), '1000')
+      await page.getByRole('button', { name: 'Review payment', exact: true }).click()
+      // Two immediate clicks still authorize one submission only.
+      await page.evaluate(() => {
+        const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Send payment')
+        button.click(); button.click()
+      })
+      await receipt.getByText('Payment sent', { exact: true }).waitFor()
+      await idle()
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+      assert.equal(await unresolved.count(), 0)
+      assert.equal(await page.getByRole('region', { name: 'Review payment' }).count(), 0)
+      await shot('sent')
+      // A distinct subsequent payment does not wait for either payment to mine.
+      await receipt.getByRole('button', { name: 'Send another' }).click()
+      assert.equal(await page.getByLabel('To', { exact: true }).inputValue(), '')
+      await draft('500')
+      await page.getByRole('button', { name: 'Send payment', exact: true }).click()
+      await receipt.getByText('Payment sent', { exact: true }).waitFor(); await idle()
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 2)
+      await receipt.getByRole('button', { name: 'Done', exact: true }).click()
+      assert.equal(await page.getByRole('button', { name: 'Move to wallet' }).isEnabled(), true)
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+
+      // Truly unresolved outcomes are distinct; checking cannot create a payment.
+      await connect('pending=unprocessed&payments')
+      await unresolved.getByRole('heading', { name: 'Check your wallet' }).waitFor()
+      assert.equal(await page.getByRole('button', { name: 'Move to wallet' }).isDisabled(), true)
       await page.evaluate(() => window.fixtureBlockRecoveryReads())
       for (let i = 0; i < 2; i++) {
-        await status.getByRole('button', { name: 'Refresh payment status' }).click()
-        await status.getByRole('button', { name: 'Refresh payment status' }).waitFor({ state: 'visible' })
-        await page.waitForFunction(() => !document.querySelector('[aria-label="Wallet payment status"] button').disabled)
-        assert.equal(await page.getByRole('alert').count(), 0, 'status refresh must not access recovery records or chain coverage')
-        await status.getByRole('heading', { name: 'Payment sent', exact: true }).waitFor()
-        assert.equal(await page.locator('.feedback').count(), 0, 'a successful status refresh must not add a duplicate notice')
+        await unresolved.getByRole('button', { name: 'Check payment in wallet' }).click(); await idle()
+        assert.equal(await page.getByRole('alert').count(), 0)
       }
-      assert.equal(await page.locator('#fixture-actions').innerText(), 'Isolated fixture · 0 wallet transactions')
-      await page.getByRole('button', { name: 'Send', exact: true }).click()
-      await page.getByLabel('To', { exact: true }).fill('1BoatSLRHtKNngkdXEeobR76b53LETtpyT')
-      await page.getByLabel('Amount in BSV').fill('0.00000001')
-      assert.equal(await page.getByRole('button', { name: 'Send BSV', exact: true }).isDisabled(), true)
-      if (evidence) await page.screenshot({ path: path.join(evidence, `pending-${width}.png`), fullPage: true })
-      await page.evaluate(() => window.fixtureSetStatus('completed'))
-      await status.getByRole('button', { name: 'Refresh payment status' }).click()
-      await page.getByText('Payment confirmed by your wallet.', { exact: true }).waitFor()
-      assert.equal(await status.count(), 0)
-      assert.equal(await page.locator('#fixture-actions').innerText(), 'Isolated fixture · 0 wallet transactions')
-      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
-      // A fresh connection must show an unknown sending outcome differently.
-      await page.goto(origin + '/test/ui.html?pending=sending')
-      await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-      await status.getByRole('heading', { name: 'Check payment status', exact: true }).waitFor()
-      await status.getByRole('button', { name: 'Refresh payment status' }).click()
-      await status.getByText('Your wallet has not reported a clear result.', { exact: true }).waitFor()
-      assert.equal(await page.locator('.feedback').count(), 0)
-      if (evidence) await page.screenshot({ path: path.join(evidence, `unknown-${width}.png`), fullPage: true })
-      assert.equal(await page.locator('#fixture-actions').innerText(), 'Isolated fixture · 0 wallet transactions')
-      await page.evaluate(() => { window.fixtureSetStatus('completed'); window.fixtureAddConflict() })
-      await status.getByRole('button', { name: 'Refresh payment status' }).click()
-      await status.getByText('Your wallet has not reported a clear result.', { exact: true }).waitFor()
-      assert.equal(await page.locator('#fixture-actions').innerText(), 'Isolated fixture · 0 wallet transactions')
-      // A stale cancel button must not cancel a payment submitted elsewhere.
-      await page.goto(origin + '/test/ui.html?pending=nosend')
-      await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-      await status.getByRole('button', { name: 'Cancel unsent payment' }).waitFor()
-      await page.evaluate(() => { window.fixtureBlockRecoveryReads(); window.fixtureSetStatus('unproven') })
-      await status.getByRole('button', { name: 'Cancel unsent payment' }).click()
-      await status.getByRole('heading', { name: 'Payment sent', exact: true }).waitFor()
-      assert.equal(await page.evaluate(() => window.fixtureAbortCalls()), 0)
-      // A still-unsent preparation retains its normal explicit cancellation.
-      await page.evaluate(() => window.fixtureSetStatus('nosend'))
-      await status.getByRole('button', { name: 'Refresh payment status' }).click()
-      await status.getByRole('button', { name: 'Cancel unsent payment' }).click()
-      await page.getByText('Unsent payment canceled.', { exact: true }).waitFor()
-      assert.equal(await status.count(), 0)
-      assert.equal(await page.evaluate(() => window.fixtureAbortCalls()), 1)
-      assert.equal(await page.locator('#fixture-actions').innerText(), 'Isolated fixture · 0 wallet transactions')
+      await shot('unknown')
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
+      await page.evaluate(() => window.fixtureSetStatus('unproven'))
+      await unresolved.getByRole('button', { name: 'Check payment in wallet' }).click(); await idle()
+      assert.equal(await unresolved.count(), 0)
+      await receipt.getByText('Payment accepted', { exact: true }).waitFor()
+      assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
+
+      if (width === 1440) {
+        // Cancel is checked against fresh wallet history, never a stale button.
+        await connect('pending=nosend')
+        await page.evaluate(() => { window.fixtureBlockRecoveryReads(); window.fixtureSetStatus('unproven') })
+        await unresolved.getByRole('button', { name: 'Cancel unsent payment' }).click(); await idle()
+        assert.equal(await page.evaluate(() => window.fixtureAbortCalls()), 0)
+        assert.equal(await unresolved.count(), 0)
+        await connect('pending=nosend')
+        await page.evaluate(() => window.fixtureBlockRecoveryReads())
+        await unresolved.getByRole('button', { name: 'Cancel unsent payment' }).click(); await idle()
+        assert.equal(await page.evaluate(() => window.fixtureAbortCalls()), 1)
+        assert.equal(await unresolved.count(), 0)
+
+        for (const mode of ['missing', 'accepted-lost', 'failed']) {
+          await connect(`submit=${mode}`); await draft('1000')
+          await page.getByRole('button', { name: 'Send payment', exact: true }).click(); await idle()
+          await unresolved.getByRole('heading', { name: 'Check your wallet' }).waitFor()
+          assert.equal(await receipt.count(), 0)
+          assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+          await unresolved.getByRole('button', { name: 'Check payment in wallet' }).click(); await idle()
+          assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+          if (mode === 'missing') assert.equal(await unresolved.count(), 1)
+          else if (mode === 'accepted-lost') { assert.equal(await unresolved.count(), 0); await receipt.getByText('Payment accepted', { exact: true }).waitFor() }
+          else { assert.equal(await receipt.count(), 0); await page.getByText('Your wallet reports this payment failed.', { exact: false }).waitFor() }
+        }
+        // Post-acceptance metadata problems cannot erase success or cause retry.
+        await connect('block-after-accept'); await draft('1000')
+        await page.getByRole('button', { name: 'Send payment', exact: true }).click(); await idle()
+        await receipt.getByText('Payment sent', { exact: true }).waitFor()
+        assert.equal(await page.getByRole('alert').count(), 0)
+        assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 1)
+
+        await connect(''); await draft('1000')
+        await page.evaluate(() => window.fixtureSetNetwork('testnet'))
+        await page.getByRole('button', { name: 'Send payment', exact: true }).click(); await idle()
+        await page.getByRole('button', { name: 'Connect wallet', exact: true }).waitFor()
+        assert.equal(await page.evaluate(() => window.fixtureSubmissionCount()), 0)
+        assert.equal(await receipt.count(), 0)
+      }
       assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
-      console.log(`PASS ${width}px: pending proof, repeated refresh, completion and unknown outcome; zero wallet transactions or external requests`)
+      console.log(`PASS ${width}px: wallet acceptance, amount review, single submission, subsequent payment, unresolved recovery; no external requests`)
     } finally { await context.close() }
   }
 } finally { await browser.close(); await server.close() }

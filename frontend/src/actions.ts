@@ -8,14 +8,16 @@ import type { WalletRecords } from './walletRecords.ts'
 import { assertInputsUnspent } from './inputChecks.ts'
 import { unfinishedWalletActions } from './walletActionState.ts'
 import { ACTION_LABEL } from './walletScopes.ts'
+import { parseSatoshis } from './paymentAmount.ts'
 export { unfinishedWalletActions } from './walletActionState.ts'
+export { parseSatoshis } from './paymentAmount.ts'
 
-export function parseSatoshis(bsv: string): number {
-  if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,8})?$/.test(bsv)) throw new Error('Enter a positive BSV amount with at most 8 decimal places.')
-  const [whole, fraction = ''] = bsv.split('.')
-  const satoshis = BigInt(whole) * 100_000_000n + BigInt(fraction.padEnd(8, '0'))
-  if (satoshis <= 0n || satoshis > 2_100_000_000_000_000n) throw new Error('Amount is outside the valid BSV range.')
-  return Number(satoshis)
+export class PaymentOutcomeUnknownError extends Error {
+  readonly txid: string
+  constructor(txid: string) {
+    super('Check your wallet before sending this payment again.')
+    this.txid = txid
+  }
 }
 
 type Progress = (message: string) => void
@@ -43,7 +45,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
     const started = performance.now()
     let nonce = 0
     while (performance.now() - started < 30_000) {
-      progress(`Preparing an eligible transaction (attempt ${nonce + 1}). Your wallet may request permission; payment fees apply to the submitted payment.`)
+      progress('Preparing your payment…')
       // A two-step action is unsigned until signAction. Request ordinary
       // preparation here: noSend preparation can trigger wallet batch funding
       // that adds migration inputs even when an import already covers its fees.
@@ -56,7 +58,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
       for (const output of args.outputs ?? []) {
         if (tx.outputs.filter(x => x.lockingScript.toHex() === output.lockingScript && BigInt(x.satoshis ?? -1) === BigInt(output.satoshis)).length !== 1) throw new Error('Wallet did not preserve the requested recipient and amount')
       }
-      progress('Checking the wallet’s coins before signing…')
+      progress('Checking your payment…')
       await assertInputsUnspent(tx, store.network)
       const spends: SignActionArgs['spends'] = {}
       for (const coin of coins) {
@@ -66,6 +68,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         const script = await new Importer().unlock(wallet, coin.keyID).sign(tx, index)
         spends[index] = { unlockingScript: script.toHex() }
       }
+      progress('Finishing with your wallet…')
       const signed = await wallet.signAction({ reference, spends, options: { noSend: true, returnTXIDOnly: false } })
       if (!signed.tx || !signed.txid) throw new Error('Wallet omitted signed transaction evidence')
       const final = Transaction.fromAtomicBEEF(signed.tx)
@@ -97,12 +100,12 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         if (fresh.state?.pending && !addressMatches(recipient, fresh.state.pending.target)) throw new Error('This address expires at the pending transition. Use a longer-coverage destination.')
       }
       // Permission dialogs and concurrent apps can change the spend state.
-      progress('Checking the wallet’s coins before submission…')
+      progress('Sending payment…')
       await assertInputsUnspent(final, store.network)
       submissionStarted = true
       const result = await wallet.createAction({ description: 'Submit eligible Mountaintops payment', options: { sendWith: [signedTxid], acceptDelayedBroadcast: false, returnTXIDOnly: false } })
-      const status = result.sendWithResults?.find(x => x.txid === signedTxid)?.status
-      if (!status || status === 'failed') throw new Error('Wallet reported a submission failure; inspect its transaction status before another payment.')
+      const acknowledgments = result.sendWithResults?.filter(item => item.txid === signedTxid) ?? []
+      if (acknowledgments.length !== 1 || !['sending', 'unproven'].includes(acknowledgments[0].status)) throw new Error('Wallet did not acknowledge acceptance of this exact payment.')
       return signedTxid
     }
     throw new Error('No eligible transaction found within the 30-second work budget. Nothing was submitted.')
@@ -115,7 +118,7 @@ export async function eligibleAction(wallet: WalletInterface, store: WalletRecor
         throw new Error('Wallet action cleanup is unresolved. Open the wallet transaction history before preparing another payment.')
       }
     }
-    if (submissionStarted) throw new Error(`Submission outcome is uncertain${signedTxid ? ` for ${signedTxid}` : ''}. The wallet may retry automatically. Do not send again; check wallet history.`)
+    if (submissionStarted) throw new PaymentOutcomeUnknownError(signedTxid!)
     throw error
   }
 }
