@@ -5,6 +5,7 @@ import { WalletRecords, type RecoveryRecord } from './walletRecords.ts'
 import { applyExpirations, bookFromRecords } from './addressBook.ts'
 import { calendarEstimate, expirationEstimate, receivingKeyID } from './receiveUX.ts'
 import ReceiveInfo from './ReceiveInfo.tsx'
+import PaymentStatus from './PaymentStatus.tsx'
 import { readCoverage, type Coverage } from './coverageClient.ts'
 import { availableRetainedCoins, refreshCoins, type Coin } from './coins.ts'
 import { importCoins, sendCoins } from './actions.ts'
@@ -202,7 +203,8 @@ export default function Mountaintops() {
     const submitted = await importCoins(client, fresh.store, entry, coins, fresh.coverage, setMessage)
     setCheckedPayments(x => ({ ...x, [keyID]: false }))
     setTxid(submitted); setHistory(x => [{ txid: submitted, description: 'Import to wallet', status: 'Submitted' }, ...x]); setBalances(x => ({ ...x, [keyID]: undefined }))
-    await reload(fresh); setMessage('Transfer submitted. Check your wallet for the final result.')
+    const next = await reload(fresh)
+    setMessage(unresolvedActions(next.records).length ? '' : 'Transfer submitted.')
   })
   const send = () => void run(async () => {
     const fresh = await reload()
@@ -212,8 +214,9 @@ export default function Mountaintops() {
     if (own) assertReceivable(own, fresh.coverage.stage)
     const submitted = await sendCoins(client, fresh.store, recipient, amount, fresh.coverage, setMessage)
     setTxid(submitted); setHistory(x => [{ txid: submitted, description: `Send ${amount} BSV`, status: 'Submitted' }, ...x])
-    setRecipient(''); setAmount(''); await reload(fresh)
-    setMessage('Payment submitted. Check your wallet for the final result.')
+    setRecipient(''); setAmount('')
+    const next = await reload(fresh)
+    setMessage(unresolvedActions(next.records).length ? '' : 'Payment sent.')
   })
 
   const disabled = busy || searching
@@ -221,6 +224,9 @@ export default function Mountaintops() {
   const primary = session?.book.find(x => x.keyID === session.primary)
   const suggestedEntry = !candidate && !pausedSearch && !searching && session?.book.filter(x => !x.retiredAt && lastCoveredStage(x.address) > (primary ? lastCoveredStage(primary.address) : -1)).sort((a, b) => lastCoveredStage(b.address) - lastCoveredStage(a.address))[0]
   const pendingActions = session ? unresolvedActions(session.records) : []
+  const paymentHold = pendingActions.length ? pendingActions.every(action => action.state === 'awaiting confirmation')
+    ? 'New transfers are paused until your outgoing payment confirms.'
+    : 'Check the payment above before starting another transfer.' : ''
   const allPaymentsChecked = Boolean(session?.book.every(x => checkedPayments[x.keyID]))
   const checkedCount = session?.book.filter(x => checkedPayments[x.keyID]).length ?? 0
   const savedSearches = session ? [...new Map(session.records.filter(x => x.kind === 'search').map(x => [Number(x.data.stage), x.data])).values()]
@@ -247,7 +253,7 @@ export default function Mountaintops() {
         {!entry.retiredAt && !selected && <button disabled={disabled || Boolean(session?.receivingBlocked)} onClick={() => choose(entry.keyID)}>Use for receiving</button>}
       </div>
       {!selected && <><div className="funds-row"><div>{total !== undefined && (total > 0 || checkedPayments[entry.keyID]) ? <><strong className="funds">{total.toLocaleString()} sats</strong><span className="small">{money(total)} · available here</span></> : <span className="small">{total === undefined ? 'Payments not checked' : 'Not checked for new payments'}</span>}</div><button className="secondary" disabled={disabled} onClick={() => checkCoins(entry.keyID)}>{entry.retiredAt ? 'Check earlier payments' : total === undefined ? 'Check for payments' : 'Refresh'}</button></div>
-      {Boolean(coins?.length) && <div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>}</>}
+      {Boolean(coins?.length) && <><div className="import-row"><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button><span className="small">Wallet fees apply.</span></div>{paymentHold && <p className="small">{paymentHold}</p>}</>}</>}
       <details className="technical"><summary>Address details</summary><p>{coverageLabel(entry.address, entry.network, session!.coverage.anchorMtp, entry.retiredAt)}</p>{entry.retiredAt && <p>Expired at block {entry.retiredAt.height.toLocaleString()}. New-deposit lookups have stopped permanently.</p>}<p>Key ID {entry.keyID} · address rules satisfied through stage {level}. Payment transaction rules also apply.</p>{coins && <p>Funding transactions: {coins.filter(x => x.fundingCoverage === 'covered').length} covered at confirmation, {coins.filter(x => x.fundingCoverage === 'outside coverage').length} outside coverage, {coins.filter(x => x.fundingCoverage === 'unconfirmed').length} unconfirmed. These labels do not change ownership.</p>}</details>
     </article>
   }
@@ -256,9 +262,8 @@ export default function Mountaintops() {
     <header><div className="brand"><img className="mountain-mark" src="/mountaintops.svg" width="40" height="40" alt="" aria-hidden="true" /><h1>Mountaintops</h1></div><p>Public BSV payments.</p></header>
     {!session ? <section className="connect"><h2>Your BSV, ready to receive.</h2><p>Connect your wallet to find your addresses and payments.</p><button className="accent" disabled={disabled} onClick={connect}>{busy ? 'Connecting…' : 'Connect wallet'}</button><p className="small">Use the same BRC-100 wallet on any device.</p></section> : <>
       <nav className="view-tabs" aria-label="Payment direction"><button aria-pressed={view === 'receive'} onClick={() => setView('receive')}>Receive</button><button aria-pressed={view === 'send'} onClick={() => setView('send')}>Send</button><span className="connection">{session.network === 'mainnet' ? 'Mainnet' : 'Testnet'} · Connected</span></nav>
-      {pendingActions.length > 0 && <section className="warning" aria-label="Wallet payment status"><h2>{pendingActions.every(action => action.state === 'awaiting confirmation') ? 'Submitted; waiting for confirmation' : 'Check your wallet before continuing'}</h2><p>Do not send these payments again. Confirmation may take time after submission.</p>{statusCheckedAt && <p className="small">Last checked {new Date(statusCheckedAt).toLocaleTimeString()}.</p>}{pendingActions.map(action => <div key={String(action.id)}>
-        <p>{action.state === 'awaiting confirmation' ? walletStatusMessage('unproven') : action.state === 'prepared' ? 'This payment is prepared but has not been submitted.' : walletStatusMessage('unknown')}</p>
-        <details><summary>Payment details</summary><p className="transaction">{String(action.state)} {action.txid ? `· ${String(action.txid)}` : ''}</p></details><button disabled={disabled} onClick={() => void run(async () => {
+      <PaymentStatus actions={pendingActions} checkedAt={statusCheckedAt} disabled={disabled} busy={busy} onReview={action => void run(async () => {
+        setError(''); setMessage('')
         try {
           let result = await refreshPaymentStatus(client, session.identity, session.network, session.records, action)
           let canceled = false
@@ -270,12 +275,12 @@ export default function Mountaintops() {
             result = await refreshPaymentStatus(client, session.identity, session.network, result.records, action)
           }
           setSession({ ...session, records: result.records }); setStatusCheckedAt(Date.now())
-          setMessage(canceled ? 'Unsent payment canceled.' : result.status === 'unproven' ? 'Payment status refreshed. Still waiting for confirmation.' : walletStatusMessage(result.status))
+          setMessage(canceled ? 'Unsent payment canceled.' : unresolvedActions(result.records).length ? '' : walletStatusMessage(result.status))
         } catch (error) {
           if (error instanceof WalletAccountChangedError) clearWalletSession()
           throw error
         }
-      })}>{action.state === 'prepared' ? 'Cancel unsent payment' : 'Refresh payment status'}</button></div>)}</section>}
+      }, true)} />
       {session.receivingBlocked && <p className="error" role="alert">{session.receivingBlocked}</p>}
       {session.coverage.persistenceWarning && <p className="notice">{session.coverage.persistenceWarning}</p>}
       {(message || error) && <div className="feedback">{message && !searching && <p className="notice" role="status">{message}</p>}{error && <p className="error" role="alert">{error}</p>}</div>}
@@ -283,7 +288,8 @@ export default function Mountaintops() {
         {primary ? card(primary, true) : <div className="empty-state"><h2>Choose a receiving address</h2><p>Find a new address or choose an active one below. Earlier payments remain yours.</p></div>}
         <div className="payments-panel"><div className="section-heading"><h3>Payments to your addresses</h3><button className="secondary" disabled={disabled} onClick={checkAllCoins}>Refresh payments</button></div>
           <p className="small">{allPaymentsChecked ? 'All addresses checked this session.' : checkedCount ? `${checkedCount} of ${session.book.length} addresses checked for new payments.` : session.book.every(x => balances[x.keyID] !== undefined) ? 'Payments restored from your wallet. Refresh to check for new ones.' : 'Some payments still need checking. Refresh to check all addresses.'}</p>
-          {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong><span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span></div><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button></div>)}
+          {session.book.filter(x => balances[x.keyID]?.length).map(entry => <div className="payment-row" key={entry.keyID}><div><span className="received-label">Received</span><strong>{balances[entry.keyID]!.reduce((sum, coin) => sum + coin.satoshis, 0).toLocaleString()} sats</strong><span className="small">{entry.keyID === '1' ? 'Original address' : `Address …${entry.address.slice(-6)}`}{entry.retiredAt ? ' · earlier payments' : ''}</span></div><button disabled={disabled || pendingActions.length > 0} onClick={() => importMoney(entry.keyID)}>Move to wallet</button></div>)}
+          {paymentHold && session.book.some(x => balances[x.keyID]?.length) && <p className="small payment-hold">{paymentHold}</p>}
           {session.book.some(x => balances[x.keyID]?.length) && <p className="small">Wallet fees apply when moving coins.</p>}
           {allPaymentsChecked && session.book.every(x => balances[x.keyID]?.length === 0) && <p className="small">No available payments found.</p>}
         </div>
@@ -298,7 +304,7 @@ export default function Mountaintops() {
         </div>
         <details className="address-list"><summary>Other addresses <span className="count">{session.book.filter(x => x.keyID !== primary?.keyID).length}</span></summary><p className="small">Switching is free for this session. Reconnecting opens your longest-lasting eligible saved address.</p>{session.book.filter(x => x.keyID !== primary?.keyID).map(x => card(x))}<button className="secondary" disabled={disabled} onClick={() => void run(async () => { await reload(); setMessage('Addresses and expiration checked.') })}>Refresh addresses</button></details>
         <p className="ownership-note">An address can expire. Your coins are still yours.</p>
-      </section> : <section className="send-panel"><h2>Send BSV</h2><p className="small">Public payment · wallet fees apply</p><label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="BSV address" autoComplete="off" spellCheck={false} /></label><label>Amount in BSV<input value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" /></label><button className="accent" disabled={disabled || pendingActions.length > 0 || !recipient || !amount} onClick={send}>Send BSV</button><p className="small">Expired addresses are blocked. Confirm the result in your wallet before retrying.</p>{txid && <p className="transaction">Submitted: {txid}</p>}</section>}
+      </section> : <section className="send-panel"><h2>Send BSV</h2><p className="small">Public payment · wallet fees apply</p><label>To<input value={recipient} disabled={disabled} onChange={e => setRecipient(e.target.value)} placeholder="BSV address" autoComplete="off" spellCheck={false} /></label><label>Amount in BSV<input value={amount} disabled={disabled} onChange={e => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" /></label><button className="accent" disabled={disabled || pendingActions.length > 0 || !recipient || !amount} onClick={send}>Send BSV</button><p className="small">{paymentHold || 'Wallet approval is required. Expired receiving addresses are blocked.'}</p>{txid && !pendingActions.some(action => action.txid === txid) && <p className="transaction">Submitted: {txid}</p>}</section>}
       <details className="activity"><summary>Activity this session <span className="count">{history.length}</span></summary><p className="small">Clears when you leave. Your wallet keeps its own payment records.</p>{!history.length && <p className="small">No payments yet.</p>}{history.map(x => <p className="transaction" key={x.txid}>{x.description} · {x.status}<br />{x.txid}</p>)}</details>
     </>}
     {!session && error && <p className="error" role="alert">{error}</p>}
