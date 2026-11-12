@@ -41,8 +41,25 @@ wallet.createAction = async args => {
   }
   return result
 }
+let holdRefresh = new URL(location.href).searchParams.has('hold-refresh') ? 'payments' : null
+let refreshReads = 0
+window.fixtureRefreshReads = () => refreshReads
+window.fixtureHoldNextRefresh = kind => { holdRefresh = kind }
+const pauseRefresh = async kind => {
+  if (holdRefresh !== kind) return
+  holdRefresh = null
+  await new Promise(resolve => {
+    const finish = document.createElement('button'); finish.textContent = 'Complete simulated refresh'
+    finish.onclick = () => { finish.remove(); resolve() }; counter.append(finish)
+  })
+}
 window.fetch = async (input) => {
   const url = String(input)
+  if (url.includes('/unspent/all')) {
+    refreshReads++; await pauseRefresh('payments')
+    if (new URL(location.href).searchParams.has('refresh-error')) return new Response('', { status: 400 })
+  }
+  if (url.includes('/chain/info')) await pauseRefresh('addresses')
   const headerHeight = Number(url.match(/\/block\/(\d+)\/header$/)?.[1])
   if (paymentRoots.has(headerHeight)) return Response.json({ merkleroot: paymentRoots.get(headerHeight) })
   if (url.endsWith('/spent')) return new Response('', { status: 404 })

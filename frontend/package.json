@@ -10,8 +10,9 @@
     "lint": "eslint .",
     "test": "node --test --experimental-strip-types test/*.test.mjs",
     "preview": "vite preview",
-    "test:browser": "node test/browser/copy-address.mjs && node test/browser/payment-status.mjs",
-    "test:browser:copy": "node test/browser/copy-address.mjs"
+    "test:browser": "node test/browser/copy-address.mjs && node test/browser/refresh-payments.mjs && node test/browser/payment-status.mjs",
+    "test:browser:copy": "node test/browser/copy-address.mjs",
+    "test:browser:refresh": "node test/browser/refresh-payments.mjs"
   },
   "dependencies": {
     "@bsv/sdk": "4.0.0",
